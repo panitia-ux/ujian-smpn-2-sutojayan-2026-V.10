@@ -1,0 +1,18 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Pengaturan aplikasi (judul, logo)
+    match /settings/{settingId} {
+      allow read, write: if true;
+    }
+
+    // Seluruh koleksi aplikasi ujian (exams, schedules, master_plan, subjects, classrooms, rooms, tokens, users, activeSessions, violations)
+    // Diizinkan untuk read & write agar operasional ujian, pengawas, dan mode bypass kuota dapat berjalan lancar tanpa kendala izin
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
+

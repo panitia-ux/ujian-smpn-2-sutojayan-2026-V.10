@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      (function () {
+        var origStringify = JSON.stringify;
+        JSON.stringify = function (value, replacer, space) {
+          try {
+            return origStringify.call(JSON, value, replacer, space);
+          } catch (err) {
+            if (err && err instanceof TypeError) {
+              var seen = new WeakSet();
+              return origStringify.call(
+                JSON,
+                value,
+                function (key, val) {
+                  if (typeof val === 'object' && val !== null) {
+                    if (seen.has(val)) return '[Circular]';
+                    seen.add(val);
+                  }
+                  return typeof replacer === 'function' ? replacer.call(this, key, val) : val;
+                },
+                space
+              );
+            }
+            throw err;
+          }
+        };
+        function isIgnorable(text) {
+          if (!text) return false;
+          var str = String(text).toLowerCase();
+          return (
+            str.indexOf('internal assertion failed') !== -1 ||
+            str.indexOf('unexpected state') !== -1 ||
+            str.indexOf('resource_exhausted') !== -1 ||
+            str.indexOf('quota') !== -1
+          );
+        }
+
+        window.addEventListener('error', function (event) {
+          var msg = String((event && (event.message || (event.error && (event.error.message || event.error.stack)))) || '');
+          if (isIgnorable(msg)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }
+        }, true);
+
+        window.addEventListener('unhandledrejection', function (event) {
+          var reason = event && event.reason;
+          var msg = String((reason && (reason.message || reason.stack || reason)) || '');
+          if (isIgnorable(msg)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }
+        }, true);
+      })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CBT Ujian Sekolah - SMPN 2 Sutojayan</title>
+    <meta name="description" content="Aplikasi Ujian Sekolah & Asesmen Berbasis Komputer Anti-Curang SMP Negeri 2 Sutojayan." />
+    <meta property="og:title" content="CBT Ujian Sekolah - SMPN 2 Sutojayan" />
+    <meta property="og:description" content="Aplikasi Ujian Sekolah & Asesmen Berbasis Komputer Anti-Curang SMP Negeri 2 Sutojayan." />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

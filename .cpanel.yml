@@ -1,0 +1,7 @@
+---
+deployment:
+  tasks:
+    - export DEPLOYPATH=/home/smpnsuto/public_html/ujian/
+    - /bin/mkdir -p $DEPLOYPATH
+    - /bin/cp -a dist/. $DEPLOYPATH
+    - cd $DEPLOYPATH && chmod -R 755 ./

@@ -1,0 +1,232 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role-based access control.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "pengawas", "siswa", "pending"] },
+        "nis": { "type": "string", "description": "Nomor Induk Siswa (opsional)" },
+        "kelas": { "type": "string", "description": "Class name (e.g., 7A, X-IPA-1)" },
+        "ruang": { "type": "string", "description": "Exam room name (e.g., Ruang 01)" },
+        "isRegistrationComplete": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "username", "role"]
+    },
+    "Exam": {
+      "title": "Exam",
+      "description": "Exam details including Google Form link, schedule, subject, and assignments.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "subjectId": { "type": "string", "description": "Reference to Subject" },
+        "googleFormLink": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "startTime": { "type": "string", "format": "date-time" },
+        "endTime": { "type": "string", "format": "date-time" },
+        "tokenReleaseMode": { "type": "string", "enum": ["manual", "automatic"] },
+        "isTokenReleased": { "type": "boolean" },
+        "assignments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "classroomId": { "type": "string" },
+              "roomId": { "type": "string" },
+              "supervisorId": { "type": "string" }
+            }
+          }
+        },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "googleFormLink", "isActive", "startTime", "endTime", "tokenReleaseMode"]
+    },
+    "Subject": {
+      "title": "Subject",
+      "description": "Mata Pelajaran.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "Classroom": {
+      "title": "Classroom",
+      "description": "Daftar Sub-Kelas yang terkelompok di bawah Tingkatan (Kelas VII, Kelas VIII, Kelas IX).",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Sub-class name (e.g., 7A - 7J, 8A - 8J, 9A - 9J)" },
+        "gradeLevel": { "type": "string", "enum": ["Kelas VII", "Kelas VIII", "Kelas IX"], "description": "Parent grade level (Tingkatan)" }
+      },
+      "required": ["name"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "Daftar Ruang Ujian.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "Token": {
+      "title": "Token",
+      "description": "Access token for an exam.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "examId": { "type": "string" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "examId", "expiresAt"]
+    },
+    "Violation": {
+      "title": "Violation",
+      "description": "Recorded exam violation.",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "kelas": { "type": "string" },
+        "ruang": { "type": "string" },
+        "examId": { "type": "string" },
+        "examTitle": { "type": "string" },
+        "type": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "screenshotUrl": { "type": "string" },
+        "isReset": { "type": "boolean" },
+        "resetAt": { "type": "string", "format": "date-time" },
+        "resetBy": { "type": "string" }
+      },
+      "required": ["studentId", "examId", "type", "timestamp"]
+    },
+    "ActiveSession": {
+      "title": "ActiveSession",
+      "description": "Real-time tracking of students currently taking an exam.",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string" },
+        "studentName": { "type": "string" },
+        "kelas": { "type": "string" },
+        "ruang": { "type": "string" },
+        "examId": { "type": "string" },
+        "examTitle": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "violation", "finished"] },
+        "lastUpdate": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentId", "examId", "status"]
+    },
+    "Schedule": {
+      "title": "Schedule",
+      "description": "Manual exam schedule assignment.",
+      "type": "object",
+      "properties": {
+        "supervisorEmail": { "type": "string" },
+        "supervisorName": { "type": "string" },
+        "classroomId": { "type": "string" },
+        "className": { "type": "string" },
+        "startTime": { "type": "string", "format": "date-time" },
+        "subjectId": { "type": "string" },
+        "subjectName": { "type": "string" },
+        "roomId": { "type": "string" },
+        "roomName": { "type": "string" },
+        "examId": { "type": "string" },
+        "examTitle": { "type": "string" },
+        "masterPlanId": { "type": "string", "description": "Link to Master Plan day" },
+        "sessionIndex": { "type": "number", "description": "Index of session in Master Plan day" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["supervisorEmail", "className", "startTime", "subjectName", "roomName", "examId"]
+    },
+    "MasterPlan": {
+      "title": "MasterPlan",
+      "description": "Master plan for exam days and sessions.",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string", "format": "date" },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "startTime": { "type": "string" },
+              "endTime": { "type": "string" },
+              "subjectId": { "type": "string" },
+              "classes": { "type": "array", "items": { "type": "string" }, "description": "Classes involved in this session" }
+            }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["date", "sessions"]
+    },
+    "AppSettings": {
+      "title": "AppSettings",
+      "description": "Global application settings and role permissions.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "loginSubtitle": { "type": "string" },
+        "logoUrl": { "type": "string" },
+        "allowSupervisorAddExam": { "type": "boolean" },
+        "allowSupervisorDeleteViolation": { "type": "boolean" },
+        "allowSupervisorResetViolation": { "type": "boolean" }
+      }
+    }
+  },
+  "firestore": {
+    "/settings/{settingId}": {
+      "schema": "AppSettings",
+      "description": "Global application settings."
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles."
+    },
+    "/exams/{examId}": {
+      "schema": "Exam",
+      "description": "Exam definitions."
+    },
+    "/schedules/{scheduleId}": {
+      "schema": "Schedule",
+      "description": "Manual exam schedules."
+    },
+    "/tokens/{tokenId}": {
+      "schema": "Token",
+      "description": "Exam access tokens."
+    },
+    "/violations/{violationId}": {
+      "schema": "Violation",
+      "description": "Violation logs."
+    },
+    "/activeSessions/{sessionId}": {
+      "schema": "ActiveSession",
+      "description": "Real-time session tracking."
+    },
+    "/subjects/{subjectId}": {
+      "schema": "Subject",
+      "description": "List of subjects."
+    },
+    "/classrooms/{classroomId}": {
+      "schema": "Classroom",
+      "description": "List of classrooms."
+    },
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "List of exam rooms."
+    },
+    "/master_plan/{planId}": {
+      "schema": "MasterPlan",
+      "description": "Master plan for exam scheduling."
+    }
+  }
+}

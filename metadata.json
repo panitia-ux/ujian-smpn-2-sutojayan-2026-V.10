@@ -1,0 +1,10 @@
+{
+  "name": "Remix Remix Remix UJIAN SMPN 2 SUTOJAYAN V10",
+  "description": "UJIAN SMPN 2 SUTOJAYAN V10",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
