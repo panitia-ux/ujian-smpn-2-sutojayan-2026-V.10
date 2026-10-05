@@ -82,6 +82,7 @@ export const db = (() => {
   try {
     return initializeFirestore(app, {
       localCache: memoryLocalCache(),
+      ignoreUndefinedProperties: true,
     }, firestoreDbId);
   } catch (e) {
     return getFirestore(app, firestoreDbId);

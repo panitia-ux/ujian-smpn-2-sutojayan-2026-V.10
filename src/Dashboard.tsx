@@ -2496,14 +2496,7 @@ export default function Dashboard() {
         const bundleSnap = await getDoc(doc(db, 'settings', 'public_bundle'));
         if (bundleSnap.exists()) {
           const bData = bundleSnap.data();
-          // Jika Soal sudah dimuat dari Pemeriksaan Ke-1 (Spreadsheet), pertahankan soal Spreadsheet namun tetap ambil jadwal & token aktif dari bundle
-          if (loadedFromSheet && bData) {
-            const { exams: _ignoredExams, ...restBundle } = bData;
-            applyPublicBundleData(restBundle);
-            loadedFromBundle = true;
-          } else {
-            loadedFromBundle = applyPublicBundleData(bData);
-          }
+          loadedFromBundle = applyPublicBundleData(bData);
         }
       } catch (e) {}
 
@@ -2623,6 +2616,7 @@ export default function Dashboard() {
     let violationsUnsub = () => {};
     let tokensUnsub = () => {};
     let usersUnsub = () => {};
+    let publicBundleUnsub = () => {};
 
     const actualRole = (userProfile.role || '').toLowerCase().trim();
     const isSuperAdmin = isSuperAdminEmail(user?.email) || isSuperAdminEmail(userProfile?.email);
@@ -2698,11 +2692,6 @@ export default function Dashboard() {
           const bundleSnap = await getDoc(doc(db, 'settings', 'public_bundle'));
           if (bundleSnap.exists()) {
             const bData = bundleSnap.data();
-            if (loadedExamsFromSheet && bData) {
-              const { exams: _ignored, ...restBundle } = bData;
-              applyPublicBundleData(restBundle);
-              return;
-            }
             if (applyPublicBundleData(bData)) {
               return;
             }
@@ -2735,6 +2724,20 @@ export default function Dashboard() {
       hasFetchedLookupsRef.current = true;
       fetchStaticLookupsOnce();
     }
+
+    // 0.1 Real-time listener on public_bundle untuk seluruh peran (Siswa, Pengawas, Admin)
+    // Dokumen tunggal ini (settings/public_bundle) memuat data ujian aktif & token dari server.
+    // Saat Admin mengaktifkan soal dari Bank Soal di Browser A, seluruh Browser B langsung
+    // mendeteksi soal & token aktif secara instan (<100ms) tanpa refresh manual!
+    try {
+      publicBundleUnsub = onSnapshot(doc(db, 'settings', 'public_bundle'), (snapshot) => {
+        if (snapshot.exists()) {
+          applyPublicBundleData(snapshot.data());
+        }
+      }, (err) => {
+        console.warn("Public bundle snapshot notice:", err.message);
+      });
+    } catch (e) {}
 
     // Real-time synchronization for Master Data ONLY for Admin (Students & Supervisors use one-shot fetchStaticLookupsOnce to save 90% quota)
     if (!isActualStudent && !isActualPengawas) {
@@ -3243,6 +3246,7 @@ export default function Dashboard() {
     }
 
     return () => {
+      publicBundleUnsub();
       examsUnsub();
       schedulesUnsub();
       subjectsUnsub();
@@ -6534,6 +6538,9 @@ export default function Dashboard() {
       ...targetExam,
       id: targetId,
       isActive: nextActive,
+      isArchived: nextActive ? false : Boolean(targetExam.isArchived),
+      adminLocked: nextActive ? false : true,
+      isTokenReleased: nextActive ? true : false,
       tokenStatusUpdatedAtMs: nowTs,
     };
 
@@ -6552,7 +6559,7 @@ export default function Dashboard() {
     } catch (err) {}
 
     showToast(
-      `Status soal "${targetExam.title}" diubah menjadi ${nextActive ? 'AKTIF' : 'NONAKTIF'}.`,
+      `Status soal "${targetExam.title}" diubah menjadi ${nextActive ? 'AKTIF (Token Diizinkan)' : 'NONAKTIF'}.`,
       'info'
     );
 
@@ -6561,7 +6568,15 @@ export default function Dashboard() {
       withFirestoreTimeout(
         setDoc(
           doc(db, 'exams', targetId),
-          { ...firestoreDocFields, isActive: nextActive, tokenStatusUpdatedAtMs: nowTs },
+          {
+            ...firestoreDocFields,
+            isActive: nextActive,
+            isArchived: nextActive ? false : Boolean(targetExam.isArchived),
+            adminLocked: nextActive ? false : true,
+            isTokenReleased: nextActive ? true : false,
+            tokenStatusUpdatedAtMs: nowTs,
+            updatedAt: serverTimestamp(),
+          },
           { merge: true }
         ),
         2800
@@ -6667,12 +6682,13 @@ export default function Dashboard() {
         exam.subjectName ||
         exam.subjectId ||
         '';
+      const nowTs = Date.now();
       const updatedFields = {
         isArchived: false,
         isActive: true,
         adminLocked: false,
         isTokenReleased: true,
-        tokenStatusUpdatedAtMs: Date.now(),
+        tokenStatusUpdatedAtMs: nowTs,
         restoredAt: new Date().toISOString(),
       };
       const restoredExamObj = {
@@ -6685,15 +6701,16 @@ export default function Dashboard() {
       // 1. Simpan ke registri lokal & state UI secara instan (0ms)
       saveCreatedExamLocally(restoredExamObj);
 
-      const nextExamsList = exams.map(e =>
-        String(e.id).trim() === targetId ? restoredExamObj : e
-      );
+      const existsInList = exams.some(e => String(e.id).trim() === targetId);
+      const nextExamsList = existsInList
+        ? exams.map(e => String(e.id).trim() === targetId ? restoredExamObj : e)
+        : [restoredExamObj, ...exams];
       setExams(nextExamsList);
       try {
         localStorage.setItem('cached_dashboard_exams', JSON.stringify(nextExamsList));
         if (typeof BroadcastChannel !== 'undefined') {
           const bc = new BroadcastChannel('smpn2_token_sync_channel');
-          bc.postMessage({ type: 'EXAM_STATUS_UPDATED', exam: restoredExamObj, timestamp: Date.now() });
+          bc.postMessage({ type: 'EXAM_STATUS_UPDATED', exam: restoredExamObj, timestamp: nowTs });
           bc.close();
         }
       } catch (err) {}
@@ -6713,6 +6730,9 @@ export default function Dashboard() {
               ...firestoreDocFields,
               isArchived: false,
               isActive: true,
+              isTokenReleased: true,
+              adminLocked: false,
+              tokenStatusUpdatedAtMs: nowTs,
               restoredAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             },
@@ -6725,6 +6745,9 @@ export default function Dashboard() {
             ...restoredExamObj,
             rawLink: decryptLink(exam.googleFormLink || exam.link || ''),
             isArchived: false,
+            isActive: true,
+            isTokenReleased: true,
+            adminLocked: false,
           },
           appSettings?.spreadsheetWebAppUrl
         ),

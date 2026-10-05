@@ -409,8 +409,10 @@ export const mergeExamWithLocalOverride = (remoteExam: any, localExam: any): any
   const remoteTokenTs = Number(remoteExam.tokenStatusUpdatedAtMs || 0);
   const localTokenTs = Number(localExam.tokenStatusUpdatedAtMs || 0);
 
-  // Gunakan status token lokal HANYA jika memiliki tokenStatusUpdatedAtMs yang lebih baru dari server
-  const useLocalTokenState = localTokenTs > 0 && localTokenTs >= remoteTokenTs;
+  // Status server diutamakan jika server mengaktifkan/membuka ujian dari Bank Soal
+  // atau jika server memiliki timestamp yang lebih baru
+  const isServerRestoredOrActive = remoteExam.isArchived === false && (remoteExam.isActive !== false || remoteExam.isTokenReleased === true);
+  const useLocalTokenState = !isServerRestoredOrActive && localTokenTs > 0 && localTokenTs > remoteTokenTs;
 
   return hydrateRecordTimestamps({
     ...remoteExam,
