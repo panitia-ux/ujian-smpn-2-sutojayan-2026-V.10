@@ -219,8 +219,8 @@ const verifySmartExamTokenOffline = (code: string, candidateExams: any[]): any |
 
   // Prioritaskan ujian yang aktif dan tidak diarsipkan
   const orderedExams = [...(candidateExams || [])].sort((a, b) => {
-    const aReady = !a.isArchived && !a.adminLocked ? 1 : 0;
-    const bReady = !b.isArchived && !b.adminLocked ? 1 : 0;
+    const aReady = !a.isArchived && (!a.adminLocked || a.isTokenReleased) ? 1 : 0;
+    const bReady = !b.isArchived && (!b.adminLocked || b.isTokenReleased) ? 1 : 0;
     return bReady - aReady;
   });
 
@@ -769,7 +769,7 @@ export default function Dashboard() {
       getCreatedExamsLocally().forEach((ce: any) => {
         const cid = String(ce?.id || '').trim();
         if (cid && !delSet.has(cid)) {
-          examMap.set(cid, hydrateRecordTimestamps({ ...(examMap.get(cid) || {}), ...ce }));
+          examMap.set(cid, mergeExamWithLocalOverride(examMap.get(cid), ce));
         }
       });
       return Array.from(examMap.values());
@@ -1566,7 +1566,12 @@ export default function Dashboard() {
           setExams(prev => {
             const exMap = new Map<string, any>();
             prev.forEach(e => { if (e?.id && !delSet.has(String(e.id).trim())) exMap.set(e.id, e); });
-            sheetExams.forEach(e => { if (e?.id && !delSet.has(String(e.id).trim())) exMap.set(e.id, { ...exMap.get(e.id), ...e }); });
+            sheetExams.forEach(e => {
+              if (e?.id && !delSet.has(String(e.id).trim())) {
+                const prevItem = exMap.get(e.id);
+                exMap.set(e.id, prevItem ? mergeExamWithLocalOverride(e, prevItem) : e);
+              }
+            });
             getCreatedExamsLocally().forEach(ce => {
               const cid = String(ce?.id || '').trim();
               if (cid && !delSet.has(cid)) exMap.set(cid, mergeExamWithLocalOverride(exMap.get(cid), ce));
@@ -1597,15 +1602,10 @@ export default function Dashboard() {
         addUsersToMap(localUpdatedUsers, true);
       }
 
-      // Terapkan juga jadwal/token dari public_bundle (Cadangan Ke-2) jika tersedia
+      // Terapkan juga jadwal/soal/token dari public_bundle (Cadangan Ke-2) jika tersedia
       if (bundleSnapRes.status === 'fulfilled' && bundleSnapRes.value && (bundleSnapRes.value as any).exists?.()) {
         const bData = (bundleSnapRes.value as any).data();
-        if (loadedSheetExams > 0 && bData) {
-          const { exams: _ignore, ...restBundle } = bData;
-          applyPublicBundleData(restBundle);
-        } else {
-          applyPublicBundleData(bData);
-        }
+        applyPublicBundleData(bData);
       }
 
       const finalUsers = Array.from(userMap.values()).sort((a: any, b: any) =>
@@ -2241,31 +2241,40 @@ export default function Dashboard() {
     }
     if (Array.isArray(bundle.exams)) {
       const delSet = getDeletedExamIds();
-      const examMap = new Map<string, any>();
-      bundle.exams
-        .filter((e: any) => !e?.id || !delSet.has(String(e.id).trim()))
-        .forEach((e: any) => {
-          const eid = String(e.id || '').trim();
-          if (eid) {
-            examMap.set(eid, {
-              ...e,
-              startTime: typeof e.startTime === 'number' ? Timestamp.fromMillis(e.startTime) : e.startTime,
-              endTime: typeof e.endTime === 'number' ? Timestamp.fromMillis(e.endTime) : e.endTime,
-            });
+      setExams(prev => {
+        const examMap = new Map<string, any>();
+        prev.forEach((pe: any) => {
+          const pid = String(pe?.id || '').trim();
+          if (pid && !delSet.has(pid)) examMap.set(pid, pe);
+        });
+        bundle.exams
+          .filter((e: any) => !e?.id || !delSet.has(String(e.id).trim()))
+          .forEach((e: any) => {
+            const eid = String(e.id || '').trim();
+            if (eid) {
+              const existing = examMap.get(eid);
+              const hydratedRemote = {
+                ...existing,
+                ...e,
+                startTime: typeof e.startTime === 'number' ? Timestamp.fromMillis(e.startTime) : (e.startTime || existing?.startTime),
+                endTime: typeof e.endTime === 'number' ? Timestamp.fromMillis(e.endTime) : (e.endTime || existing?.endTime),
+              };
+              examMap.set(eid, existing ? mergeExamWithLocalOverride(hydratedRemote, existing) : hydratedRemote);
+            }
+          });
+        getCreatedExamsLocally().forEach((ce: any) => {
+          const cid = String(ce?.id || '').trim();
+          if (cid && !delSet.has(cid)) {
+            examMap.set(cid, mergeExamWithLocalOverride(examMap.get(cid), ce));
           }
         });
-      getCreatedExamsLocally().forEach((ce: any) => {
-        const cid = String(ce?.id || '').trim();
-        if (cid && !delSet.has(cid)) {
-          examMap.set(cid, hydrateRecordTimestamps({ ...(examMap.get(cid) || {}), ...ce }));
+        const parsedExams = Array.from(examMap.values());
+        if (parsedExams.length > 0 || delSet.size > 0) {
+          try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(parsedExams)); } catch (err) {}
         }
+        return parsedExams;
       });
-      const parsedExams = Array.from(examMap.values());
-      if (parsedExams.length > 0 || delSet.size > 0) {
-        setExams(parsedExams);
-        try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(parsedExams)); } catch (err) {}
-        applied = true;
-      }
+      applied = true;
     }
     if (Array.isArray(bundle.subjects) && bundle.subjects.length > 0) {
       setSubjects(bundle.subjects);
@@ -5685,7 +5694,9 @@ export default function Dashboard() {
         startTime: startTs,
         endTime: endTs,
         tokenReleaseMode: newExam.tokenReleaseMode,
-        isTokenReleased: newExam.tokenReleaseMode === 'automatic',
+        isTokenReleased: true,
+        adminLocked: false,
+        isArchived: false,
         assignments: newExam.assignments || [],
         createdBy: user?.uid || userProfile?.uid || 'admin',
         createdAt: serverTimestamp()
@@ -6580,6 +6591,17 @@ export default function Dashboard() {
           { merge: true }
         ),
         2800
+      ),
+      upsertExamToSpreadsheet(
+        {
+          ...updatedExamObj,
+          rawLink: decryptLink(targetExam.googleFormLink || targetExam.link || ''),
+          isActive: nextActive,
+          isArchived: nextActive ? false : Boolean(targetExam.isArchived),
+          isTokenReleased: nextActive,
+          adminLocked: !nextActive,
+        },
+        appSettings?.spreadsheetWebAppUrl
       ),
       syncPublicBundleToFirestore({ exams: nextExamsList }),
     ]).catch(() => {});
@@ -9391,11 +9413,14 @@ export default function Dashboard() {
     let exam = exams.find(e => e.id === selectedExamForToken);
     if (!exam) return;
 
-    // Jika di memori lokal tampak terkunci (!isTokenReleased || adminLocked):
+    // Jika di memori lokal tampak dikunci Admin secara eksplisit (adminLocked === true dan belum dirilis):
     // 1. Jika yang menekan adalah Admin: otomatis buka kunci izin rilis token & langsung generate token!
     // 2. Jika yang menekan adalah Pengawas: cek status terbaru ke Firestore (exams & public_bundle) serta Spreadsheet terlebih dahulu
     //    agar jika Admin baru saja klik "Izinkan Rilis Token", Pengawas langsung berhasil generate token tanpa perlu refresh manual!
-    if (!exam.isTokenReleased || exam.adminLocked) {
+    // 3. Jika Admin TIDAK mengunci ujian (adminLocked !== true), Pengawas DAPAT langsung generate token!
+    const isExplicitlyLockedByAdmin = Boolean(exam.adminLocked && !exam.isTokenReleased);
+
+    if (isExplicitlyLockedByAdmin) {
       if (isAdmin) {
         const nowTs = Date.now();
         const unlockedExam = {
@@ -9432,7 +9457,7 @@ export default function Dashboard() {
           ]);
           if (exSnap.status === 'fulfilled' && exSnap.value.exists()) {
             const remoteData = exSnap.value.data();
-            if (remoteData?.isTokenReleased && !remoteData?.adminLocked) {
+            if (!remoteData?.adminLocked || remoteData?.isTokenReleased) {
               nowUnlocked = true;
               exam = { ...exam, ...remoteData, id: exam.id, isTokenReleased: true, adminLocked: false, isArchived: false, isActive: true };
             }
@@ -9443,7 +9468,7 @@ export default function Dashboard() {
             const bExam = Array.isArray(bData?.exams)
               ? bData.exams.find((be: any) => String(be?.id).trim() === String(exam?.id).trim())
               : null;
-            if (bExam?.isTokenReleased && !bExam?.adminLocked) {
+            if (bExam && (!bExam?.adminLocked || bExam?.isTokenReleased)) {
               nowUnlocked = true;
               exam = { ...exam, ...bExam, id: exam.id, isTokenReleased: true, adminLocked: false, isArchived: false, isActive: true };
             }
@@ -9452,7 +9477,7 @@ export default function Dashboard() {
             const sheetRes = await fetchMasterFromSpreadsheet(appSettings?.spreadsheetWebAppUrl, true, db);
             if (sheetRes.ok && Array.isArray(sheetRes.exams)) {
               const sExam = sheetRes.exams.find((se: any) => String(se?.id).trim() === String(exam?.id).trim());
-              if (sExam?.isTokenReleased && !sExam?.adminLocked) {
+              if (sExam && (!sExam?.adminLocked || sExam?.isTokenReleased)) {
                 nowUnlocked = true;
                 exam = { ...exam, ...sExam, id: exam.id, isTokenReleased: true, adminLocked: false, isArchived: false, isActive: true };
               }
@@ -9475,6 +9500,18 @@ export default function Dashboard() {
           );
           return;
         }
+      }
+    } else {
+      // Jika Admin tidak mengunci ujian, otomatis pastikan status lokal ditandai isTokenReleased: true
+      if (!exam.isTokenReleased) {
+        const autoReleasedExam = { ...exam, isTokenReleased: true, adminLocked: false };
+        exam = autoReleasedExam;
+        saveCreatedExamLocally(autoReleasedExam);
+        setExams(prev => {
+          const next = prev.map(e => (e.id === autoReleasedExam.id ? autoReleasedExam : e));
+          try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(next)); } catch (err) {}
+          return next;
+        });
       }
     }
 
@@ -13708,7 +13745,7 @@ export default function Dashboard() {
                         if (isUsedInArray || isDetailLocked || isUsedInStudentTokens) return false;
 
                         const exObj = exams.find(e => e.id === t.examId);
-                        if (exObj && (exObj.isArchived || exObj.adminLocked)) return false;
+                        if (exObj && (exObj.isArchived || (exObj.adminLocked && !exObj.isTokenReleased))) return false;
                         if (exObj && myGrade) {
                           const targetGrades = detectTargetGradesForExam(exObj);
                           if (targetGrades.length > 0 && !targetGrades.includes(myGrade)) return false;
@@ -13915,12 +13952,12 @@ export default function Dashboard() {
                           {[...exams]
                             .filter(e => !e.isArchived)
                             .sort((a, b) => {
-                              const aReady = a.isTokenReleased && !a.adminLocked ? 1 : 0;
-                              const bReady = b.isTokenReleased && !b.adminLocked ? 1 : 0;
+                              const aReady = !a.adminLocked || a.isTokenReleased ? 1 : 0;
+                              const bReady = !b.adminLocked || b.isTokenReleased ? 1 : 0;
                               return bReady - aReady;
                             })
                             .map(e => {
-                              const isAllowed = Boolean(e.isTokenReleased && !e.adminLocked);
+                              const isAllowed = Boolean(!e.adminLocked || e.isTokenReleased);
                               return (
                                 <option key={e.id} value={e.id}>
                                   {isAllowed ? '🟢 ' : '🔒 '}
@@ -13981,7 +14018,8 @@ export default function Dashboard() {
 
                     {(() => {
                       const currExam = exams.find(e => e.id === selectedExamForToken);
-                      if (currExam && (!currExam.isTokenReleased || currExam.adminLocked)) {
+                      const isCurrLocked = Boolean(currExam && currExam.adminLocked && !currExam.isTokenReleased);
+                      if (currExam && isCurrLocked) {
                         return (
                           <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between gap-3 text-red-700">
                             <div className="flex items-center gap-2">
@@ -14000,7 +14038,7 @@ export default function Dashboard() {
                           </div>
                         );
                       }
-                      if (examToken && currExam?.isTokenReleased && !currExam?.adminLocked) {
+                      if (examToken && currExam && !isCurrLocked) {
                         const isAllRooms = currExam.adminToken === examToken || isAdmin;
                         return (
                           <div className="mt-4 p-5 bg-gradient-to-br from-blue-700 via-indigo-800 to-slate-900 rounded-2xl text-white shadow-xl border border-blue-400/30 animate-in fade-in space-y-3">
@@ -16366,12 +16404,12 @@ export default function Dashboard() {
                       <option value="">-- Pilih Ujian --</option>
                       {[...activeUnarchivedExams]
                         .sort((a, b) => {
-                          const aReady = a.isTokenReleased && !a.adminLocked ? 1 : 0;
-                          const bReady = b.isTokenReleased && !b.adminLocked ? 1 : 0;
+                          const aReady = !a.adminLocked || a.isTokenReleased ? 1 : 0;
+                          const bReady = !b.adminLocked || b.isTokenReleased ? 1 : 0;
                           return bReady - aReady;
                         })
                         .map(e => {
-                          const isAllowed = Boolean(e.isTokenReleased && !e.adminLocked);
+                          const isAllowed = Boolean(!e.adminLocked || e.isTokenReleased);
                           return (
                             <option key={e.id} value={e.id}>
                               {isAllowed ? '🟢 ' : '🔒 '}
@@ -16431,7 +16469,8 @@ export default function Dashboard() {
                 </div>
                 {(() => {
                   const currExam = activeUnarchivedExams.find(e => e.id === selectedExamForToken);
-                  if (currExam && (!currExam.isTokenReleased || currExam.adminLocked)) {
+                  const isCurrLocked = Boolean(currExam && currExam.adminLocked && !currExam.isTokenReleased);
+                  if (currExam && isCurrLocked) {
                     return (
                       <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between gap-3 text-red-700">
                         <div className="flex items-center gap-2">
@@ -16450,7 +16489,7 @@ export default function Dashboard() {
                       </div>
                     );
                   }
-                  if (examToken && currExam?.isTokenReleased && !currExam?.adminLocked) {
+                  if (examToken && currExam && !isCurrLocked) {
                     const isAllRooms = currExam.adminToken === examToken || isAdmin;
                     return (
                       <div className="mt-4 p-5 bg-gradient-to-br from-blue-700 via-indigo-800 to-slate-900 rounded-2xl text-white shadow-xl border border-blue-400/30 animate-in fade-in space-y-3">
@@ -16542,7 +16581,7 @@ export default function Dashboard() {
                                   <td className="px-4 py-3">
                                     {(() => {
                                       const currSelectedExam = exams.find(e => e.id === selectedExamForToken);
-                                      const isLocked = currSelectedExam ? (!currSelectedExam.isTokenReleased || currSelectedExam.adminLocked) : false;
+                                      const isLocked = currSelectedExam ? Boolean(currSelectedExam.adminLocked && !currSelectedExam.isTokenReleased) : false;
                                       return (
                                         <div>
                                           <span className={`font-mono font-bold ${isLocked ? 'text-gray-400 line-through' : 'text-blue-600'}`}>{token.code}</span>
@@ -16645,8 +16684,8 @@ export default function Dashboard() {
                   }
                   if (examStatusFilter === 'active' && !ex.isActive) return false;
                   if (examStatusFilter === 'inactive' && ex.isActive) return false;
-                  if (examStatusFilter === 'token_released' && (!ex.isTokenReleased || ex.adminLocked)) return false;
-                  if (examStatusFilter === 'token_locked' && ex.isTokenReleased && !ex.adminLocked) return false;
+                  if (examStatusFilter === 'token_released' && (ex.adminLocked && !ex.isTokenReleased)) return false;
+                  if (examStatusFilter === 'token_locked' && (!ex.adminLocked || ex.isTokenReleased)) return false;
 
                   if (examSearchQuery.trim()) {
                     const q = examSearchQuery.trim().toLowerCase();
@@ -16688,8 +16727,8 @@ export default function Dashboard() {
                     return (a.title || '').localeCompare(b.title || '', 'id', { numeric: true, sensitivity: 'base' });
                   }
                   if (examSortBy === 'status_active') {
-                    const scoreA = (a.isActive ? 2 : 0) + (a.isTokenReleased && !a.adminLocked ? 1 : 0);
-                    const scoreB = (b.isActive ? 2 : 0) + (b.isTokenReleased && !b.adminLocked ? 1 : 0);
+                    const scoreA = (a.isActive ? 2 : 0) + (!a.adminLocked || a.isTokenReleased ? 1 : 0);
+                    const scoreB = (b.isActive ? 2 : 0) + (!b.adminLocked || b.isTokenReleased ? 1 : 0);
                     if (scoreB !== scoreA) return scoreB - scoreA;
                     return getExamTimestampMs(a.startTime) - getExamTimestampMs(b.startTime);
                   }
@@ -16953,7 +16992,7 @@ export default function Dashboard() {
 
                     <div className="bg-blue-50/50 p-3 rounded-2xl mb-4 border border-blue-100">
                       {(() => {
-                        const isTokenAllowed = Boolean(exam.isTokenReleased && !exam.adminLocked && !exam.isArchived);
+                        const isTokenAllowed = Boolean((!exam.adminLocked || exam.isTokenReleased) && !exam.isArchived && exam.isActive !== false);
                         return (
                           <>
                             <div className="flex items-center justify-between mb-2">
@@ -16987,7 +17026,7 @@ export default function Dashboard() {
                             ) : (
                               <p className="text-[10px] text-gray-500 italic">
                                 {isTokenAllowed
-                                  ? '✓ Token diizinkan Admin (Siap Generate)'
+                                  ? '✓ Token diizinkan (Siap Rilis / Generate)'
                                   : '🔒 Token dikunci oleh Admin'}
                               </p>
                             )}

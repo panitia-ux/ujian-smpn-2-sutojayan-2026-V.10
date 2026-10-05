@@ -414,21 +414,26 @@ export const mergeExamWithLocalOverride = (remoteExam: any, localExam: any): any
   const isServerRestoredOrActive = remoteExam.isArchived === false && (remoteExam.isActive !== false || remoteExam.isTokenReleased === true);
   const useLocalTokenState = !isServerRestoredOrActive && localTokenTs > 0 && localTokenTs > remoteTokenTs;
 
-  return hydrateRecordTimestamps({
-    ...remoteExam,
+  const baseMerged = {
     ...localExam,
-    googleFormLink: localExam.googleFormLink || remoteExam.googleFormLink || localExam.link || remoteExam.link || '',
-    startTime: localExam.startTime || remoteExam.startTime,
-    endTime: localExam.endTime || remoteExam.endTime,
+    ...remoteExam,
+    googleFormLink: remoteExam.googleFormLink || localExam.googleFormLink || remoteExam.link || localExam.link || '',
+    startTime: remoteExam.startTime || localExam.startTime,
+    endTime: remoteExam.endTime || localExam.endTime,
+    duration: remoteExam.duration || localExam.duration || 90,
+  };
+
+  return hydrateRecordTimestamps({
+    ...baseMerged,
     isTokenReleased: useLocalTokenState
       ? Boolean(localExam.isTokenReleased)
-      : Boolean(remoteExam.isTokenReleased),
+      : (remoteExam.isTokenReleased !== undefined ? Boolean(remoteExam.isTokenReleased) : (!remoteExam.adminLocked && remoteExam.isActive !== false)),
     adminLocked: useLocalTokenState
       ? Boolean(localExam.adminLocked)
-      : Boolean(remoteExam.adminLocked),
+      : Boolean(remoteExam.adminLocked && !remoteExam.isTokenReleased),
     isActive: useLocalTokenState
       ? localExam.isActive !== false
-      : remoteExam.isActive !== false,
+      : (remoteExam.isActive !== false && !remoteExam.isArchived),
     isArchived: useLocalTokenState
       ? Boolean(localExam.isArchived)
       : Boolean(remoteExam.isArchived),
@@ -1216,8 +1221,9 @@ export const fetchMasterFromSpreadsheet = async (
             const examId = String(e.id || `sheet_exam_${idx + 1}`).trim();
             const existingExam = bundledExamById.get(examId) || {};
             const rawStatus = String(e.statusToken || e.isTokenReleased || 'BUKA').toUpperCase().trim();
-            const isReleased = rawStatus === 'BUKA' || rawStatus === 'TRUE' || rawStatus === 'AKTIF' || rawStatus === '1';
-            const isLocked = rawStatus === 'KUNCI' || rawStatus === 'LOCKED' || e.adminLocked === true;
+            const isExplicitLocked = rawStatus === 'KUNCI' || rawStatus === 'LOCKED' || e.adminLocked === true;
+            const isArchivedExam = rawStatus === 'ARSIP' || e.isArchived === true;
+            const isReleased = rawStatus === 'BUKA' || rawStatus === 'TRUE' || rawStatus === 'AKTIF' || rawStatus === '1' || !isExplicitLocked;
             const rawClasses = typeof e.classes === 'string'
               ? e.classes.split(',').map((c: string) => c.trim()).filter(Boolean)
               : (Array.isArray(e.classes) ? e.classes : []);
@@ -1242,11 +1248,11 @@ export const fetchMasterFromSpreadsheet = async (
               endTime: e.endTime || existingExam.endTime || Timestamp.fromDate(nowDefaultEnd),
               duration: Number(e.duration || e.durasi || existingExam.duration || 90) || 90,
               isActive:
-                rawStatus === 'ARSIP' ? false : (e.isActive !== false),
+                isArchivedExam ? false : (e.isActive !== false),
               isArchived:
-                rawStatus === 'ARSIP' || e.isArchived === true,
-              isTokenReleased: isReleased && !isLocked,
-              adminLocked: isLocked,
+                isArchivedExam,
+              isTokenReleased: !isArchivedExam && !isExplicitLocked,
+              adminLocked: !isArchivedExam && isExplicitLocked,
               tokenReleaseMode: e.tokenReleaseMode || existingExam.tokenReleaseMode || 'manual',
               assignments: rawClasses.length > 0
                 ? [{ className: rawClasses.join(', '), classes: rawClasses }]
@@ -1595,12 +1601,12 @@ export const upsertExamToSpreadsheet = async (examObj: any, webAppUrl?: string):
               ? examObj.assignments.map((a: any) => a.className || (a.classes || []).join(', ')).filter(Boolean).join(', ')
               : '',
             googleFormLink: decryptExamLinkForSheet(examObj.rawLink || examObj.googleFormLink || examObj.link || ''),
-            statusToken: examObj.isArchived ? 'ARSIP' : (examObj.isTokenReleased && !examObj.adminLocked ? 'BUKA' : 'KUNCI'),
+            statusToken: examObj.isArchived ? 'ARSIP' : (examObj.adminLocked && !examObj.isTokenReleased ? 'KUNCI' : 'BUKA'),
             duration: examObj.duration || 90,
           },
         }),
       },
-      5000
+      12000
     );
     const data = await res.json();
     return data?.status === 'ok';
