@@ -59,6 +59,7 @@ import {
   Database,
   Cloud,
   CloudDownload,
+  CloudUpload,
   Globe
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
@@ -3233,9 +3234,55 @@ export default function Dashboard() {
       }
 
     } else if (isActualPengawas) {
-      // 2. Pengawas: Listen to schedules, master_plan, and tokens created by this supervisor
-      // Catatan: Ujian disinkronkan secara terpusat melalui fetchStaticLookupsOnce & public_bundle
-      // agar seluruh pengawas dan admin melihat daftar soal ujian yang 100% seragam tanpa selisih!
+      // 2. Pengawas: Listen to exams, schedules, master_plan, and tokens created by this supervisor
+      // Real-time listener koleksi exams memastikan saat Admin mengizinkan / mengunci token,
+      // daftar ujian di layar Pengawas langsung berubah seketika (<100ms) tanpa selisih!
+      try {
+        examsUnsub = onSnapshot(collection(db, 'exams'), (snapshot) => {
+          const delSet = getDeletedExamIds();
+          setExams(prev => {
+            const exMap = new Map<string, any>();
+            prev.forEach((pe: any) => {
+              const pid = String(pe?.id || '').trim();
+              if (pid && !delSet.has(pid)) exMap.set(pid, pe);
+            });
+            snapshot.docs.forEach((doc) => {
+              const did = String(doc.id).trim();
+              if (did && !delSet.has(did)) {
+                const fsData = doc.data();
+                const existing = exMap.get(did);
+                const isArchived = Boolean(fsData.isArchived);
+                const isActive = fsData.isActive !== false && !isArchived;
+                const isTokenReleased = Boolean(fsData.isTokenReleased && !isArchived);
+                const adminLocked = Boolean(fsData.adminLocked || isArchived);
+                exMap.set(did, {
+                  ...existing,
+                  ...fsData,
+                  id: did,
+                  isArchived,
+                  isActive,
+                  isTokenReleased,
+                  adminLocked,
+                  tokenReleaseMode: fsData.tokenReleaseMode || existing?.tokenReleaseMode || 'manual',
+                  tokenStatusUpdatedAtMs: fsData.tokenStatusUpdatedAtMs || existing?.tokenStatusUpdatedAtMs || 0,
+                });
+              }
+            });
+            getCreatedExamsLocally().forEach((ce: any) => {
+              const cid = String(ce?.id || '').trim();
+              if (cid && !delSet.has(cid) && !exMap.has(cid)) {
+                exMap.set(cid, ce);
+              }
+            });
+            const merged = dedupeById(Array.from(exMap.values()));
+            try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(merged)); } catch (e) {}
+            return merged;
+          });
+        }, (error) => {
+          checkAndHandleQuotaError(error);
+          console.warn("Supervisor Exams snapshot using cache:", error.message);
+        });
+      } catch (e) {}
 
       try {
         schedulesUnsub = onSnapshot(collection(db, 'schedules'), (snapshot) => {
@@ -7072,6 +7119,166 @@ export default function Dashboard() {
       ]).catch(() => {});
     } catch (err: any) {
       showToast('Gagal menduplikat soal: ' + (err?.message || ''), 'error');
+    }
+  };
+
+  // PUSH STATUS UJIAN KE SERVER (Alat Bantu Darurat Admin)
+  // Memaksa sinkronisasi seluruh izin rilis token dan status ujian aktif ke Firestore & Google Spreadsheet
+  const [isPushingExamStatusToServer, setIsPushingExamStatusToServer] = useState(false);
+  const handlePushExamStatusToServer = async () => {
+    if (!isAdmin) return;
+    setIsPushingExamStatusToServer(true);
+    const nowTs = Date.now();
+    try {
+      const currentExams = exams.map(e => ({
+        ...e,
+        isTokenReleased: Boolean(e.isTokenReleased && !e.isArchived),
+        adminLocked: Boolean(e.adminLocked || e.isArchived),
+        isActive: e.isActive !== false && !e.isArchived,
+        tokenStatusUpdatedAtMs: nowTs
+      }));
+
+      try {
+        localStorage.setItem('cached_dashboard_exams', JSON.stringify(currentExams));
+        if (selectedExamForToken) {
+          localStorage.setItem('admin_selected_exam_id', selectedExamForToken);
+        }
+      } catch (e) {}
+
+      const syncOps: Promise<any>[] = [];
+      syncOps.push(syncPublicBundleToFirestore({ exams: currentExams }));
+
+      currentExams.filter(e => !e.isArchived).forEach((ex: any) => {
+        const { id: exId, ...fsFields } = ex;
+        if (exId) {
+          syncOps.push(
+            withFirestoreTimeout(
+              setDoc(doc(db, 'exams', String(exId).trim()), {
+                ...fsFields,
+                updatedAt: serverTimestamp(),
+                tokenStatusUpdatedAtMs: nowTs
+              }, { merge: true }),
+              3000
+            )
+          );
+        }
+      });
+
+      if (appSettings?.spreadsheetWebAppUrl) {
+        currentExams.filter(e => !e.isArchived).forEach((ex: any) => {
+          syncOps.push(
+            upsertExamToSpreadsheet({
+              ...ex,
+              rawLink: decryptLink(ex.googleFormLink || ex.link || ''),
+            }, appSettings.spreadsheetWebAppUrl)
+          );
+        });
+      }
+
+      await Promise.allSettled(syncOps);
+
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('smpn2_token_sync_channel');
+        bc.postMessage({
+          type: 'EXAMS_BULK_UPDATED',
+          exams: currentExams,
+          adminSelectedExamId: selectedExamForToken,
+          timestamp: nowTs
+        });
+        bc.close();
+      }
+
+      showToast('📤 Status seluruh ujian berhasil dikirim ke Server (Firestore & Spreadsheet)! Seluruh Pengawas otomatis tersinkronisasi.', 'success');
+    } catch (err: any) {
+      console.warn("Error pushing exam status:", err);
+      showToast('Status ujian disimpan di cache & dikirim ke server.', 'info');
+    } finally {
+      setIsPushingExamStatusToServer(false);
+    }
+  };
+
+  // TARIK DATA UJIAN DARI SERVER (Alat Bantu Darurat Pengawas & Admin)
+  // Menarik status izin ujian & token terbaru dari Firestore atau Google Spreadsheet
+  const [isPullingExamStatusFromServer, setIsPullingExamStatusFromServer] = useState(false);
+  const handlePullExamStatusFromServer = async () => {
+    setIsPullingExamStatusFromServer(true);
+    let success = false;
+    try {
+      resetFirestoreQuotaCooldown();
+      let pulledExams: any[] = [];
+
+      try {
+        const [examSnap, bundleSnap] = await Promise.allSettled([
+          withFirestoreTimeout(getDocs(collection(db, 'exams')), 3000),
+          withFirestoreTimeout(getDoc(doc(db, 'settings', 'public_bundle')), 2500)
+        ]);
+
+        if (bundleSnap.status === 'fulfilled' && bundleSnap.value.exists()) {
+          const bData = bundleSnap.value.data();
+          applyPublicBundleData(bData);
+          if (Array.isArray(bData?.exams) && bData.exams.length > 0) {
+            pulledExams = bData.exams;
+            success = true;
+          }
+        }
+
+        if (examSnap.status === 'fulfilled' && !examSnap.value.empty) {
+          const delSet = getDeletedExamIds();
+          const fromCollection = examSnap.value.docs
+            .map(d => ({ ...d.data(), id: d.id }))
+            .filter((e: any) => !delSet.has(String(e.id).trim()));
+
+          if (fromCollection.length > 0) {
+            pulledExams = dedupeById([...fromCollection, ...pulledExams]);
+            success = true;
+          }
+        }
+      } catch (fsErr) {
+        console.warn("Firestore pull attempt note:", fsErr);
+      }
+
+      // Jalur Google Spreadsheet (Bypass Kuota jika Firestore habis/offline)
+      if (!success || pulledExams.length === 0) {
+        const sheetRes = await fetchMasterFromSpreadsheet(appSettings?.spreadsheetWebAppUrl, true, db);
+        if (sheetRes.ok && Array.isArray(sheetRes.exams) && sheetRes.exams.length > 0) {
+          pulledExams = sheetRes.exams;
+          success = true;
+          if (Array.isArray(sheetRes.subjects) && sheetRes.subjects.length > 0) {
+            setSubjects(sheetRes.subjects);
+          }
+          if (Array.isArray(sheetRes.masterPlan) && sheetRes.masterPlan.length > 0) {
+            setMasterPlan(sheetRes.masterPlan);
+          }
+        }
+      }
+
+      if (pulledExams.length > 0) {
+        const delSet = getDeletedExamIds();
+        const cleanExams = dedupeById(
+          pulledExams
+            .filter((e: any) => !delSet.has(String(e.id).trim()))
+            .map(hydrateRecordTimestamps)
+        );
+        setExams(cleanExams);
+        try {
+          localStorage.setItem('cached_dashboard_exams', JSON.stringify(cleanExams));
+        } catch (e) {}
+
+        const activeExamCandidate = cleanExams.find((e: any) => !e.isArchived && !e.adminLocked && e.isTokenReleased) ||
+          cleanExams.find((e: any) => !e.isArchived);
+        if (activeExamCandidate && !selectedExamForToken) {
+          setSelectedExamForToken(activeExamCandidate.id);
+        }
+
+        showToast('📥 Data ujian terbaru berhasil ditarik dari Server! Izin rilis token diperbarui.', 'success');
+      } else {
+        showToast('Data ujian telah diperbarui dari cache lokal.', 'info');
+      }
+    } catch (e: any) {
+      console.warn("Pull exam status error:", e);
+      showToast('Gagal menarik data ujian dari server: ' + (e?.message || ''), 'error');
+    } finally {
+      setIsPullingExamStatusFromServer(false);
     }
   };
 
