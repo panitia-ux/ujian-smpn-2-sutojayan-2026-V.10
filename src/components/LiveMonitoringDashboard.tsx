@@ -19,7 +19,8 @@ import {
   BookOpen,
   Calendar,
   Layers,
-  ArrowUpRight
+  ArrowUpRight,
+  Key
 } from 'lucide-react';
 import { normalizeRoomName } from '../lib/classConstants';
 
@@ -54,6 +55,10 @@ export interface SupervisorMonitoringRecord {
   ruang: string;
   status: 'active' | 'standby' | 'offline';
   lastActive: string | number;
+  hasReleasedToken: boolean;
+  latestTokenCode?: string;
+  latestTokenExam?: string;
+  latestTokenTime?: any;
   activeTokens: {
     id: string;
     code: string;
@@ -84,10 +89,31 @@ interface LiveMonitoringDashboardProps {
   exams: any[];
   rooms: any[];
   classrooms: any[];
+  masterPlan?: any[];
   onResetStudentToken?: (tokenId: string, studentUid: string, studentName?: string) => Promise<void> | void;
   onRefreshData?: () => void;
   isSuperAdmin?: boolean;
 }
+
+export const parseTimestampMs = (val: any): number => {
+  if (!val) return 0;
+  if (typeof val?.toMillis === 'function') return val.toMillis();
+  if (typeof val?.toDate === 'function') return val.toDate().getTime();
+  if (typeof val === 'number') {
+    return val > 100000000000 ? val : val * 1000;
+  }
+  if (typeof val === 'object' && typeof val.seconds === 'number') {
+    return val.seconds * 1000 + Math.floor((val.nanoseconds || 0) / 1000000);
+  }
+  if (typeof val === 'object' && typeof val._seconds === 'number') {
+    return val._seconds * 1000 + Math.floor((val._nanoseconds || 0) / 1000000);
+  }
+  if (typeof val === 'string') {
+    const parsed = Date.parse(val);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+};
 
 export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = ({
   role,
@@ -103,6 +129,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
   exams = [],
   rooms = [],
   classrooms = [],
+  masterPlan = [],
   onResetStudentToken,
   onRefreshData,
   isSuperAdmin = false,
@@ -116,6 +143,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
   }, [effectiveSupervisorRuang, userProfile?.ruang, currentUser]);
 
   const [activeAdminSubTab, setActiveAdminSubTab] = useState<'supervisors' | 'students'>('supervisors');
+  const [supervisorFilter, setSupervisorFilter] = useState<'ALL' | 'RELEASED' | 'PENDING' | 'ONLINE'>('ALL');
   const [selectedRoomFilter, setSelectedRoomFilter] = useState<string>('ALL');
   const [selectedTokenFilter, setSelectedTokenFilter] = useState<string>('ALL');
   const [selectedClassFilter, setSelectedClassFilter] = useState<string>('ALL');
@@ -258,17 +286,47 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       });
     });
 
+    // 2. Tambahkan juga daftar seluruh siswa terdaftar dari Master Data User (role 'siswa')
+    // agar kotak siswa di ruang tugas tetap muncul dengan status 'Belum Masuk / Menunggu Token'
+    // sebelum siswa mulai mengetik token (sehingga layar monitoring tidak kosong 0 siswa!)
+    const seenUids = new Set(list.map((s) => s.uid));
+    const studentUsers = users.filter((u: any) => String(u.role || '').toLowerCase().trim() === 'siswa');
+    studentUsers.forEach((stu: any) => {
+      const sUid = String(stu.uid || stu.id || '');
+      if (!sUid || seenUids.has(sUid)) return;
+      seenUids.add(sUid);
+      list.push({
+        uid: sUid,
+        name: String(stu.username || stu.name || 'Siswa'),
+        nis: String(stu.nis || stu.nisn || ''),
+        email: String(stu.email || ''),
+        kelas: String(stu.kelas || '-'),
+        ruang: String(stu.ruang || '-'),
+        tokenCode: '',
+        tokenId: '',
+        examId: '',
+        examTitle: 'Menunggu Siswa Memulai Ujian',
+        status: 'idle',
+        isReset: false,
+        violationCount: 0,
+        creatorName: '-',
+        creatorRuang: stu.ruang || '-',
+      });
+    });
+
     return list.sort((a, b) => {
       // Prioritaskan pelanggaran di atas agar pengawas langsung melihat yang butuh tindakan
       if (a.status === 'violation' && b.status !== 'violation') return -1;
       if (b.status === 'violation' && a.status !== 'violation') return 1;
       if (a.status === 'working' && b.status !== 'working') return -1;
       if (b.status === 'working' && a.status !== 'working') return 1;
+      if (a.status === 'finished' && b.status === 'idle') return -1;
+      if (a.status === 'idle' && b.status === 'finished') return 1;
       return a.name.localeCompare(b.name);
     });
   }, [tokens, exams, users, violations, nowMs]);
 
-  // 1. Daftar token yang HANYA dirilis oleh akun Pengawas ini sendiri atau khusus ruangannya
+  // 1. Daftar token yang HANYA dirilis oleh akun Pengawas ini sendiri atau khusus ruangannya / token global Admin
   const mySupervisorTokens = useMemo(() => {
     if (!isPengawas || isAdmin) return tokens;
     const myUid = effectiveSupervisorUid || currentUser?.uid || userProfile?.uid || userProfile?.id;
@@ -280,7 +338,8 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       const matchEmail = t.creatorEmail && myEmail && String(t.creatorEmail).toLowerCase().trim() === myEmail;
       const matchName = t.creatorName && myName && String(t.creatorName).toLowerCase().trim() === myName;
       const matchRoom = targetSupervisorRoom && t.creatorRuang && normalizeRoomName(t.creatorRuang) === targetSupervisorRoom;
-      return Boolean(matchUid || matchEmail || matchName || matchRoom);
+      const matchGlobal = Boolean(t.isGlobalForAllWindows || t.creatorRuang === 'Semua Ruang');
+      return Boolean(matchUid || matchEmail || matchName || matchRoom || matchGlobal);
     });
   }, [tokens, isPengawas, isAdmin, effectiveSupervisorUid, effectiveSupervisorEmail, effectiveSupervisorName, targetSupervisorRoom, currentUser, userProfile]);
 
@@ -292,25 +351,25 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
   const visibleStudentRecords = useMemo(() => {
     let result = allStudentRecords;
 
-    // Jika Pengawas, HANYA tampilkan status siswa yang ada di ruangannya sendiri!
+    // Jika Pengawas, HANYA tampilkan status siswa yang ada di ruangannya sendiri atau pemakai tokennya!
     if (isPengawas && !isAdmin) {
       result = result.filter((s) => {
         const studentRoom = normalizeRoomName(s.ruang || '');
         const tokenRoom = normalizeRoomName(s.creatorRuang || '');
 
-        // Pengawas masing-masing ruang HANYA melihat siswa di ruangannya sendiri!
+        // 1. MUTLAK: Jika siswa memakai token yang dirilis pengawas ini, SELALU tampilkan!
+        const isUsingMyToken = Boolean(s.tokenCode && mySupervisorTokenCodes.has(s.tokenCode.toUpperCase().trim()));
+        if (isUsingMyToken) return true;
+
+        // 2. Jika pengawas memiliki ruang tugas, tampilkan seluruh siswa di ruangannya (termasuk yang belum masuk)
         if (targetSupervisorRoom) {
           const isMyRoom = (studentRoom && studentRoom === targetSupervisorRoom) || (tokenRoom && tokenRoom === targetSupervisorRoom);
-          if (!isMyRoom) {
-            // Jangan keluarkan siswa dari ruangan lain!
-            return false;
-          }
-          return true;
+          if (isMyRoom) return true;
         }
 
-        // Fallback jika belum memiliki ruangan tugas yang jelas: hanya siswa pemakai tokennya
-        if (mySupervisorTokenCodes.size > 0) {
-          return Boolean(s.tokenCode && mySupervisorTokenCodes.has(s.tokenCode.toUpperCase().trim()));
+        // 3. Fallback jika nama pembuat token cocok
+        if (s.creatorName && effectiveSupervisorName && s.creatorName.toLowerCase().trim() === effectiveSupervisorName.toLowerCase().trim()) {
+          return true;
         }
 
         return false;
@@ -320,7 +379,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
     // Filter Ruang (Khusus Admin yang dapat memfilter antar ruang)
     if (isAdmin && selectedRoomFilter !== 'ALL') {
       result = result.filter(
-        (s) => (s.ruang || '').toUpperCase().trim() === selectedRoomFilter.toUpperCase().trim()
+        (s) => normalizeRoomName(s.ruang || '') === normalizeRoomName(selectedRoomFilter)
       );
     }
 
@@ -381,25 +440,66 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       return r === 'pengawas' || r === 'guru' || r === 'proktor';
     });
 
+    const todayIso = new Date().toISOString().split('T')[0];
+
     return supervisorUsers.map((u: any) => {
       const uUid = String(u.uid || u.id || '');
       const uName = String(u.username || u.name || 'Pengawas');
       const uEmail = String(u.email || '').toLowerCase().trim();
-      const uRuang = String(u.ruang || '-');
+      const rawRuang = String(u.ruang || '-');
 
-      // Cari token yang dirilis oleh pengawas ini
+      // Ambil penugasan dari masterPlan (Matriks Pengawas Ruang)
+      let planRoom = '';
+      let partnerName = '';
+      let sessionName = '';
+      let isScheduledToday = false;
+
+      (masterPlan || []).forEach((day: any) => {
+        const isToday = String(day?.date || '').trim() === todayIso;
+        (day?.sessions || []).forEach((session: any) => {
+          const roomSups: any[] = Array.isArray(session?.roomSupervisors) ? session.roomSupervisors : [];
+          roomSups.forEach((rs: any) => {
+            const em1 = String(rs?.supervisorEmail || '').toLowerCase().trim();
+            const nm1 = String(rs?.supervisorName || '').toLowerCase().trim();
+            const em2 = String(rs?.supervisor2Email || '').toLowerCase().trim();
+            const nm2 = String(rs?.supervisor2Name || '').toLowerCase().trim();
+            const nmL = uName.toLowerCase();
+
+            const match1 = (uEmail && em1 === uEmail) || (nmL && (nm1 === nmL || (nmL.length > 3 && nm1.includes(nmL))));
+            const match2 = (uEmail && em2 === uEmail) || (nmL && (nm2 === nmL || (nmL.length > 3 && nm2.includes(nmL))));
+
+            if (match1 || match2) {
+              if (!planRoom || isToday) {
+                planRoom = rs.roomName || '';
+                partnerName = match1 ? (rs.supervisor2Name || rs.supervisor2Email || '') : (rs.supervisorName || rs.supervisorEmail || '');
+                sessionName = session.name || '';
+                if (isToday) isScheduledToday = true;
+              }
+            }
+          });
+        });
+      });
+
+      const uRuang = rawRuang !== '-' ? rawRuang : (planRoom || '-');
+
+      // Cari token yang dirilis oleh pengawas ini (pencocokan cerdas UID, Email, Nama, atau Ruangan Tugas)
       const myTokens = tokens.filter((t: any) => {
-        const matchUid = t.createdBy && t.createdBy === uUid;
-        const matchEmail = t.creatorEmail && t.creatorEmail.toLowerCase().trim() === uEmail;
-        const matchName = t.creatorName && t.creatorName.toLowerCase().trim() === uName.toLowerCase().trim();
-        const matchRuang = uRuang !== '-' && t.creatorRuang && t.creatorRuang.toLowerCase().trim() === uRuang.toLowerCase().trim();
-        return matchUid || matchEmail || matchName || matchRuang;
+        const matchUid = t.createdBy && (t.createdBy === uUid || t.createdBy === u.id || t.createdBy === u.uid);
+        const matchEmail = uEmail && t.creatorEmail && t.creatorEmail.toLowerCase().trim() === uEmail;
+        const matchName = uName && t.creatorName && (
+          t.creatorName.toLowerCase().trim() === uName.toLowerCase().trim() ||
+          t.creatorName.toLowerCase().includes(uName.toLowerCase().trim()) ||
+          uName.toLowerCase().includes(t.creatorName.toLowerCase().trim())
+        );
+        const matchRuang = uRuang !== '-' && t.creatorRuang && normalizeRoomName(t.creatorRuang) === normalizeRoomName(uRuang);
+        const matchPlanRoom = planRoom && t.creatorRuang && normalizeRoomName(t.creatorRuang) === normalizeRoomName(planRoom);
+        return Boolean(matchUid || matchEmail || matchName || matchRuang || matchPlanRoom);
       });
 
       // Kumpulkan siswa di bawah token/ruang pengawas ini
       const myStudents = allStudentRecords.filter((s) => {
         const hasToken = myTokens.some((t: any) => String(t.code || '').toUpperCase() === s.tokenCode);
-        const matchRoom = uRuang !== '-' && s.ruang && s.ruang.toLowerCase().trim() === uRuang.toLowerCase().trim();
+        const matchRoom = uRuang !== '-' && s.ruang && normalizeRoomName(s.ruang) === normalizeRoomName(uRuang);
         return hasToken || matchRoom;
       });
 
@@ -407,20 +507,48 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       const finishedCount = myStudents.filter((s) => s.status === 'finished').length;
       const violationCount = myStudents.filter((s) => s.status === 'violation').length;
 
-      // Status pengawas: 'active' jika ada token aktif / siswa aktif dalam 30 menit
+      // Cek apakah pengawas ini sedang aktif online / login di browser saat ini
+      const isCurrentSessionOnline = Boolean(
+        (currentUser && (
+          (currentUser.uid && (currentUser.uid === uUid || currentUser.id === uUid)) ||
+          (currentUser.email && String(currentUser.email).toLowerCase().trim() === uEmail) ||
+          (currentUser.username && String(currentUser.username).toLowerCase().trim() === uName.toLowerCase().trim()) ||
+          (currentUser.displayName && String(currentUser.displayName).toLowerCase().trim() === uName.toLowerCase().trim())
+        )) ||
+        (effectiveSupervisorEmail && effectiveSupervisorEmail.toLowerCase().trim() === uEmail) ||
+        (effectiveSupervisorName && effectiveSupervisorName.toLowerCase().trim() === uName.toLowerCase().trim()) ||
+        (effectiveSupervisorUid && (effectiveSupervisorUid === uUid || effectiveSupervisorUid === u.id))
+      );
+
+      // Cek heartbeat presence dari localStorage
+      let hasRecentHeartbeat = false;
+      try {
+        const rawPres = localStorage.getItem('active_supervisors_presence');
+        if (rawPres) {
+          const presObj = JSON.parse(rawPres);
+          const supPres = presObj[uEmail] || presObj[uUid] || presObj[uName.toLowerCase()];
+          if (supPres && typeof supPres.lastActiveMs === 'number' && nowMs - supPres.lastActiveMs < 180000) {
+            hasRecentHeartbeat = true;
+          }
+        }
+      } catch (e) {}
+
+      const hasReleasedToken = myTokens.length > 0;
       const hasActiveTokens = myTokens.some((t: any) => {
-        const exp = t.expiresAt ? new Date(t.expiresAt).getTime() : 0;
-        return exp > nowMs;
+        const exp = parseTimestampMs(t.expiresAt) || (parseTimestampMs(t.createdAt) ? parseTimestampMs(t.createdAt) + 4 * 3600 * 1000 : 0);
+        return exp > nowMs || !t.expiresAt;
       });
 
       let status: 'active' | 'standby' | 'offline' = 'standby';
-      if (hasActiveTokens || workingCount > 0) {
+      if (isCurrentSessionOnline || hasRecentHeartbeat || hasReleasedToken || workingCount > 0) {
         status = 'active';
-      } else if (myTokens.length > 0) {
+      } else if (isScheduledToday || planRoom || rawRuang !== '-') {
         status = 'standby';
       } else {
         status = 'offline';
       }
+
+      const latestTok = myTokens[0];
 
       return {
         uid: uUid,
@@ -430,6 +558,10 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
         ruang: uRuang,
         status,
         lastActive: nowMs,
+        hasReleasedToken,
+        latestTokenCode: latestTok?.code,
+        latestTokenExam: latestTok?.examTitle || exams.find((e: any) => e.id === latestTok?.examId)?.title,
+        latestTokenTime: latestTok?.createdAt || latestTok?.releasedAt,
         activeTokens: myTokens.map((t: any) => {
           const tCode = String(t.code || '').toUpperCase().trim();
           const tStudents = allStudentRecords.filter((s) => s.tokenCode === tCode);
@@ -450,12 +582,16 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
         violationStudents: violationCount,
       };
     }).sort((a, b) => {
-      // Prioritaskan pengawas aktif
+      // Prioritaskan pengawas yang sudah rilis token dan sedang aktif
+      if (a.hasReleasedToken && !b.hasReleasedToken) return -1;
+      if (!a.hasReleasedToken && b.hasReleasedToken) return 1;
       if (a.status === 'active' && b.status !== 'active') return -1;
       if (b.status === 'active' && a.status !== 'active') return 1;
+      if (a.status === 'standby' && b.status === 'offline') return -1;
+      if (a.status === 'offline' && b.status === 'standby') return 1;
       return a.ruang.localeCompare(b.ruang);
     });
-  }, [users, tokens, allStudentRecords, exams, nowMs]);
+  }, [users, tokens, allStudentRecords, exams, masterPlan, currentUser, effectiveSupervisorEmail, effectiveSupervisorName, effectiveSupervisorUid, nowMs]);
 
   // Statistik Keseluruhan
   const stats = useMemo(() => {
@@ -467,6 +603,8 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
     const idleCount = listToCount.filter((s) => s.status === 'idle').length;
 
     const activeSupervisorsCount = supervisorRecords.filter((s) => s.status === 'active').length;
+    const releasedSupervisorsCount = supervisorRecords.filter((s) => s.hasReleasedToken).length;
+    const pendingSupervisorsCount = supervisorRecords.length - releasedSupervisorsCount;
     const totalSupervisorsCount = supervisorRecords.length;
 
     return {
@@ -476,9 +614,30 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       violationCount,
       idleCount,
       activeSupervisorsCount,
+      releasedSupervisorsCount,
+      pendingSupervisorsCount,
       totalSupervisorsCount,
     };
   }, [visibleStudentRecords, supervisorRecords]);
+
+  // Pengawas yang difilter untuk tampilan Admin
+  const displayedSupervisors = useMemo(() => {
+    return supervisorRecords.filter((sup) => {
+      if (supervisorFilter === 'RELEASED' && !sup.hasReleasedToken) return false;
+      if (supervisorFilter === 'PENDING' && sup.hasReleasedToken) return false;
+      if (supervisorFilter === 'ONLINE' && sup.status !== 'active') return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const matchName = sup.name.toLowerCase().includes(q);
+        const matchEmail = (sup.email || '').toLowerCase().includes(q);
+        const matchNip = (sup.nip || '').toLowerCase().includes(q);
+        const matchRuang = sup.ruang.toLowerCase().includes(q);
+        const matchToken = sup.activeTokens.some((t) => t.code.toLowerCase().includes(q));
+        return matchName || matchEmail || matchNip || matchRuang || matchToken;
+      }
+      return true;
+    });
+  }, [supervisorRecords, supervisorFilter, searchQuery]);
 
   // List Ruangan unik untuk filter
   const availableRooms = useMemo(() => {
@@ -607,7 +766,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
               }`}
             >
               <Users size={16} />
-              <span>Monitoring Pengawas Aktif ({stats.activeSupervisorsCount}/{stats.totalSupervisorsCount})</span>
+              <span>Monitoring Pengawas ({stats.releasedSupervisorsCount} Rilis Token • {stats.activeSupervisorsCount}/{stats.totalSupervisorsCount} Aktif)</span>
             </button>
             <button
               type="button"
@@ -792,7 +951,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                 <Users size={24} />
               </div>
               <div className="min-w-0">
-                <p className="text-xs font-bold text-gray-500 uppercase truncate">Total Peserta Token</p>
+                <p className="text-xs font-bold text-gray-500 uppercase truncate">Total Peserta Ruangan</p>
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-2xl font-black text-gray-900">{stats.totalStudents}</span>
                   <span className="text-xs text-gray-400 font-medium">Siswa</span>
@@ -812,59 +971,133 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
             <div>
               <h2 className="text-base font-bold text-gray-900 flex items-center gap-2">
                 <Users size={18} className="text-blue-600" />
-                <span>Daftar Seluruh Pengawas &amp; Ruangan Ujian</span>
+                <span>Deteksi Pengawas yang Merilis Token &amp; Ruangan Ujian</span>
               </h2>
               <p className="text-xs text-gray-500">
-                Klik kartu pengawas untuk melihat rincian kotak siswa yang sedang diawasi di ruangannya.
+                Sistem otomatis mendeteksi siapa saja pengawas yang telah merilis token untuk ujian yang dibuka kuncinya oleh Admin.
               </p>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-200">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-200 shadow-xs">
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-[0_0_6px_#10b981]" />
-                <span>{stats.activeSupervisorsCount} Online</span>
+                <span>{stats.releasedSupervisorsCount} Sudah Rilis Token</span>
               </span>
-              <span className="inline-flex items-center gap-1.5 text-xs font-bold text-gray-600 bg-gray-50 px-3 py-1.5 rounded-xl border border-gray-200">
-                <span className="w-2.5 h-2.5 rounded-full bg-gray-400" />
-                <span>{stats.totalSupervisorsCount - stats.activeSupervisorsCount} Standby</span>
+              <span className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-800 bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200 shadow-xs">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
+                <span>{stats.pendingSupervisorsCount} Belum Rilis</span>
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-xs font-bold text-blue-700 bg-blue-50 px-3 py-1.5 rounded-xl border border-blue-200 shadow-xs">
+                <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+                <span>{stats.activeSupervisorsCount} Online</span>
               </span>
             </div>
           </div>
 
+          {/* Quick Filter Bar Pengawas */}
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-gray-50 p-3 rounded-2xl border border-gray-200">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold text-gray-500 uppercase mr-1">Filter Pengawas:</span>
+              <button
+                type="button"
+                onClick={() => setSupervisorFilter('ALL')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  supervisorFilter === 'ALL'
+                    ? 'bg-gray-900 text-white shadow-xs'
+                    : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+                }`}
+              >
+                Semua ({stats.totalSupervisorsCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSupervisorFilter('RELEASED')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  supervisorFilter === 'RELEASED'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-white text-emerald-700 hover:bg-emerald-50 border border-emerald-200'
+                }`}
+              >
+                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                <span>Sudah Rilis Token ({stats.releasedSupervisorsCount})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSupervisorFilter('PENDING')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  supervisorFilter === 'PENDING'
+                    ? 'bg-amber-600 text-white shadow-xs'
+                    : 'bg-white text-amber-700 hover:bg-amber-50 border border-amber-200'
+                }`}
+              >
+                <span className="w-2 h-2 rounded-full bg-amber-400" />
+                <span>Belum Rilis Token ({stats.pendingSupervisorsCount})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSupervisorFilter('ONLINE')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  supervisorFilter === 'ONLINE'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'bg-white text-blue-700 hover:bg-blue-50 border border-blue-200'
+                }`}
+              >
+                <span className="w-2 h-2 rounded-full bg-blue-400" />
+                <span>Aktif Online ({stats.activeSupervisorsCount})</span>
+              </button>
+            </div>
+
+            <div className="w-full sm:w-64">
+              <input
+                type="text"
+                placeholder="Cari pengawas, ruang, atau token..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs outline-none focus:ring-2 focus:ring-blue-500 font-medium"
+              />
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {supervisorRecords.map((sup) => {
+            {displayedSupervisors.map((sup) => {
               const isOnline = sup.status === 'active';
               return (
                 <div
                   key={sup.uid || sup.name}
                   className={`relative rounded-3xl p-5 border-2 transition-all flex flex-col justify-between gap-4 ${
-                    isOnline
-                      ? 'border-emerald-200 bg-gradient-to-br from-emerald-50/40 via-white to-white shadow-sm hover:border-emerald-400 hover:shadow-emerald-100 hover:shadow-lg'
+                    sup.hasReleasedToken
+                      ? 'border-emerald-300 bg-gradient-to-br from-emerald-50/50 via-white to-white shadow-sm hover:border-emerald-500 hover:shadow-emerald-100 hover:shadow-lg'
+                      : isOnline
+                      ? 'border-blue-200 bg-white hover:border-blue-400 shadow-sm'
                       : 'border-gray-200 bg-white hover:border-gray-300 shadow-sm'
                   }`}
                 >
-                  {/* Top Bar: LED Lampu Penanda + Ruang */}
+                  {/* Top Bar: Status Rilis Token + LED + Ruang */}
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2.5 min-w-0">
                       {/* LED Indicator Lamp */}
                       <div className="relative shrink-0">
-                        {isOnline ? (
+                        {sup.hasReleasedToken ? (
                           <span className="flex h-3.5 w-3.5 relative">
                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                             <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500 shadow-[0_0_10px_#10b981] ring-4 ring-emerald-100"></span>
                           </span>
+                        ) : isOnline ? (
+                          <span className="inline-flex rounded-full h-3.5 w-3.5 bg-blue-500 ring-2 ring-blue-100 shadow-[0_0_6px_#3b82f6]"></span>
                         ) : (
-                          <span className="inline-flex rounded-full h-3.5 w-3.5 bg-gray-300 ring-2 ring-gray-100"></span>
+                          <span className="inline-flex rounded-full h-3.5 w-3.5 bg-amber-400 ring-2 ring-amber-100 shadow-[0_0_6px_#f59e0b]"></span>
                         )}
                       </div>
                       <div className="truncate">
                         <span
                           className={`text-[11px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
-                            isOnline
-                              ? 'text-emerald-700 bg-emerald-100/80 border-emerald-300'
-                              : 'text-gray-500 bg-gray-100 border-gray-200'
+                            sup.hasReleasedToken
+                              ? 'text-emerald-800 bg-emerald-100 border-emerald-300 shadow-xs'
+                              : isOnline
+                              ? 'text-blue-700 bg-blue-100/80 border-blue-300'
+                              : 'text-amber-800 bg-amber-100/90 border-amber-300'
                           }`}
                         >
-                          {isOnline ? '🟢 AKTIF MENGAWASI' : '⚪ STANDBY / BELUM AKTIF'}
+                          {sup.hasReleasedToken ? '🟢 SUDAH RILIS TOKEN' : isOnline ? '🔵 ONLINE (BELUM RILIS)' : '🟡 STANDBY BERTUGAS'}
                         </span>
                       </div>
                     </div>
@@ -885,25 +1118,39 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                   </div>
 
                   {/* Token yang dirilis */}
-                  <div className="bg-gray-50/80 p-3 rounded-2xl border border-gray-100 space-y-1.5 text-xs">
+                  <div className={`p-3 rounded-2xl border space-y-1.5 text-xs ${
+                    sup.hasReleasedToken
+                      ? 'bg-emerald-50/70 border-emerald-200'
+                      : 'bg-gray-50/80 border-gray-100'
+                  }`}>
                     <p className="text-[11px] font-bold text-gray-500 uppercase flex items-center justify-between">
-                      <span>Token Dirilis:</span>
-                      <span className="font-extrabold text-blue-600">{sup.activeTokens.length} Token</span>
+                      <span>Token Ujian:</span>
+                      <span className={`font-extrabold ${sup.hasReleasedToken ? 'text-emerald-700' : 'text-gray-400'}`}>
+                        {sup.activeTokens.length > 0 ? `${sup.activeTokens.length} Token Dirilis` : 'Belum Dirilis'}
+                      </span>
                     </p>
                     {sup.activeTokens.length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {sup.activeTokens.map((tok) => (
-                          <span
-                            key={tok.id || tok.code}
-                            className="px-2 py-0.5 bg-blue-100 text-blue-800 font-mono font-black text-[11px] rounded-lg border border-blue-200"
-                            title={tok.examTitle}
-                          >
-                            #{tok.code}
-                          </span>
-                        ))}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap gap-1.5">
+                          {sup.activeTokens.map((tok) => (
+                            <span
+                              key={tok.id || tok.code}
+                              className="px-2.5 py-1 bg-emerald-600 text-white font-mono font-black text-xs rounded-xl shadow-xs border border-emerald-500 flex items-center gap-1.5"
+                              title={tok.examTitle}
+                            >
+                              <Key size={12} />
+                              <span>{tok.code}</span>
+                            </span>
+                          ))}
+                        </div>
+                        <p className="text-[11px] text-emerald-800 font-medium truncate">
+                          {sup.latestTokenExam || sup.activeTokens[0]?.examTitle}
+                        </p>
                       </div>
                     ) : (
-                      <p className="text-gray-400 italic text-[11px]">Belum merilis token ujian hari ini</p>
+                      <p className="text-amber-700/80 italic text-[11px]">
+                        Menunggu pengawas merilis token untuk ruangan ini...
+                      </p>
                     )}
                   </div>
 
@@ -930,11 +1177,18 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                       if (sup.ruang && sup.ruang !== '-') {
                         setSelectedRoomFilter(sup.ruang);
                       }
+                      if (sup.activeTokens.length > 0 && sup.activeTokens[0]?.code) {
+                        setSelectedTokenFilter(sup.activeTokens[0].code);
+                      }
                       setActiveAdminSubTab('students');
                     }}
-                    className="w-full py-2.5 bg-gray-900 hover:bg-black text-white font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
+                    className={`w-full py-2.5 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer ${
+                      sup.hasReleasedToken
+                        ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                        : 'bg-gray-900 hover:bg-black text-white'
+                    }`}
                   >
-                    <span>Pantau Kotak Siswa di Ruang Ini</span>
+                    <span>{sup.hasReleasedToken ? 'Pantau Siswa Pemakai Token Ini' : 'Pantau Kotak Siswa di Ruang Ini'}</span>
                     <ArrowUpRight size={14} />
                   </button>
                 </div>
@@ -1012,6 +1266,18 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                 >
                   <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
                   <span>Terkunci ({stats.violationCount})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter('idle')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                    statusFilter === 'idle'
+                      ? 'bg-amber-600 text-white shadow-sm shadow-amber-200'
+                      : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200/60'
+                  }`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-amber-400" />
+                  <span>Belum Masuk ({stats.idleCount})</span>
                 </button>
               </div>
             </div>
@@ -1137,12 +1403,12 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                 const isIdle = student.status === 'idle';
 
                 // Tema visual per status
-                let cardBorder = 'border-gray-200 bg-white hover:border-gray-300';
+                let cardBorder = 'border-gray-200 bg-white hover:border-gray-300 shadow-2xs';
                 let ledElement = (
-                  <span className="inline-flex rounded-full h-3.5 w-3.5 bg-amber-400 ring-2 ring-amber-100" />
+                  <span className="inline-flex rounded-full h-3.5 w-3.5 bg-gray-300 ring-2 ring-gray-100" />
                 );
-                let badgeText = 'TIDAK AKTIF';
-                let badgeClass = 'bg-amber-100 text-amber-800 border-amber-200';
+                let badgeText = 'BELUM MASUK';
+                let badgeClass = 'bg-gray-100 text-gray-600 border-gray-200';
 
                 if (isWorking) {
                   cardBorder =
@@ -1178,7 +1444,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
 
                 return (
                   <div
-                    key={`${student.uid}_${student.tokenCode}`}
+                    key={`${student.uid}_${student.tokenCode || 'notoken'}`}
                     className={`relative rounded-3xl p-4 border-2 transition-all flex flex-col justify-between gap-3 ${cardBorder}`}
                   >
                     {/* Header Kotak: Lampu Penanda LED + Status Badge + Token Code */}
@@ -1216,10 +1482,14 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                       <div className="flex items-center justify-between text-[11px] text-gray-500">
                         <span className="flex items-center gap-1">
                           <Clock size={12} className="text-gray-400" />
-                          <span>Mulai {formatClock(student.startedAt)}</span>
+                          <span>{student.startedAt ? `Mulai ${formatClock(student.startedAt)}` : 'Belum Masuk'}</span>
                         </span>
                         <span className="font-extrabold text-gray-700">
-                          {isFinished ? `Selesai ${formatClock(student.finishedAt)}` : `Durasi: ${formatDuration(student.startedAt, student.finishedAt)}`}
+                          {isFinished
+                            ? `Selesai ${formatClock(student.finishedAt)}`
+                            : isWorking
+                            ? `Durasi: ${formatDuration(student.startedAt, student.finishedAt)}`
+                            : 'Menunggu Token'}
                         </span>
                       </div>
 

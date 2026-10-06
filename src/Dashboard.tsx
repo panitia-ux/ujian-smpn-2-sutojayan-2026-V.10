@@ -1308,9 +1308,104 @@ export default function Dashboard() {
     return {};
   });
   const [examToken, setExamToken] = useState('');
-  const [selectedExamForToken, setSelectedExamForToken] = useState('');
+  const [selectedExamForToken, setSelectedExamForToken] = useState(() => {
+    try {
+      const stored = localStorage.getItem('admin_selected_exam_id');
+      if (stored) return stored;
+    } catch (e) {}
+    return '';
+  });
   const [customManualTokenInput, setCustomManualTokenInput] = useState('');
   const [showManualTokenToggle, setShowManualTokenToggle] = useState(false);
+
+  // Fungsi pemilih ujian aktif dengan sinkronisasi instan ke seluruh tab/browser (Real-Time)
+  const handleSelectExamForToken = (examId: string) => {
+    setSelectedExamForToken(examId);
+    try {
+      localStorage.setItem('admin_selected_exam_id', examId);
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('smpn2_token_sync_channel');
+        bc.postMessage({ type: 'ADMIN_SELECTED_EXAM_CHANGED', examId, timestamp: Date.now() });
+        bc.close();
+      }
+    } catch (e) {}
+    if (isAdmin) {
+      withFirestoreTimeout(
+        setDoc(doc(db, 'settings', 'public_bundle'), { adminSelectedExamId: examId, selectedExamUpdatedAtMs: Date.now() }, { merge: true }),
+        2500
+      ).catch(() => {});
+    }
+  };
+
+  // Otomatis sinkronkan & pilih ujian aktif terbaru yang diizinkan Admin saat browser baru dibuka
+  useEffect(() => {
+    if (exams.length === 0) return;
+    const currentValid = exams.find(e => e.id === selectedExamForToken && !e.isArchived);
+    if (currentValid) return;
+
+    let candidateId = '';
+    try {
+      const stored = localStorage.getItem('admin_selected_exam_id');
+      if (stored && exams.some(e => e.id === stored && !e.isArchived)) {
+        candidateId = stored;
+      }
+    } catch (e) {}
+
+    if (!candidateId && appSettings?.adminSelectedExamId) {
+      if (exams.some(e => e.id === appSettings.adminSelectedExamId && !e.isArchived)) {
+        candidateId = appSettings.adminSelectedExamId;
+      }
+    }
+
+    if (!candidateId) {
+      const unarchived = exams.filter(e => !e.isArchived);
+      const unlocked = unarchived.filter(e => !e.adminLocked || e.isTokenReleased);
+      if (unlocked.length > 0) {
+        const sorted = [...unlocked].sort((a, b) => (b.tokenStatusUpdatedAtMs || 0) - (a.tokenStatusUpdatedAtMs || 0));
+        candidateId = sorted[0].id;
+      } else if (unarchived.length > 0) {
+        candidateId = unarchived[0].id;
+      }
+    }
+
+    if (candidateId && candidateId !== selectedExamForToken) {
+      setSelectedExamForToken(candidateId);
+      try { localStorage.setItem('admin_selected_exam_id', candidateId); } catch (e) {}
+    }
+  }, [exams, selectedExamForToken, appSettings?.adminSelectedExamId]);
+
+  // Realtime heartbeat kehadiran Pengawas agar terdeteksi Admin di Pusat Kendali Monitoring
+  useEffect(() => {
+    if (!isPengawas) return;
+    const sendPulse = () => {
+      const email = (effectiveSupervisorEmail || user?.email || userProfile?.email || '').toLowerCase().trim();
+      const name = effectiveSupervisorName || userProfile?.username || userProfile?.name || 'Pengawas';
+      const uid = effectiveSupervisorUid || user?.uid || userProfile?.uid || 'pengawas';
+      const ruang = effectiveSupervisorRuang || 'Ruang 01';
+      if (!email && !name) return;
+
+      try {
+        const raw = localStorage.getItem('active_supervisors_presence');
+        const prevObj = raw ? JSON.parse(raw) : {};
+        const nowMs = Date.now();
+        const info = { email, name, uid, ruang, lastActiveMs: nowMs };
+        if (email) prevObj[email] = info;
+        if (uid) prevObj[uid] = info;
+        prevObj[name.toLowerCase()] = info;
+        localStorage.setItem('active_supervisors_presence', JSON.stringify(prevObj));
+
+        if (typeof BroadcastChannel !== 'undefined') {
+          const bc = new BroadcastChannel('smpn2_supervisor_presence');
+          bc.postMessage({ type: 'SUPERVISOR_HEARTBEAT', ...info });
+          bc.close();
+        }
+      } catch (e) {}
+    };
+
+    sendPulse();
+    const interval = setInterval(sendPulse, 20000);
+    return () => clearInterval(interval);
+  }, [isPengawas, effectiveSupervisorEmail, effectiveSupervisorName, effectiveSupervisorUid, effectiveSupervisorRuang]);
 
   // Clear or auto-populate displayed token when selected exam changes
   useEffect(() => {
@@ -2151,6 +2246,7 @@ export default function Dashboard() {
         subjects: subList,
         schedules: schedList,
         masterPlan: planList,
+        adminSelectedExamId: selectedExamForToken || (typeof localStorage !== 'undefined' ? localStorage.getItem('admin_selected_exam_id') || '' : ''),
         updatedAt: serverTimestamp(),
       };
       if (appSettings?.spreadsheetWebAppUrl) {
@@ -2220,6 +2316,10 @@ export default function Dashboard() {
   const applyPublicBundleData = (bundle: any) => {
     if (!bundle) return false;
     let applied = false;
+    if (bundle.adminSelectedExamId) {
+      try { localStorage.setItem('admin_selected_exam_id', bundle.adminSelectedExamId); } catch (e) {}
+      setSelectedExamForToken(prev => (!prev ? bundle.adminSelectedExamId : prev));
+    }
     if (bundle.spreadsheetWebAppUrl) {
       saveSpreadsheetUrlLocally(bundle.spreadsheetWebAppUrl);
     }
@@ -2369,6 +2469,10 @@ export default function Dashboard() {
           if ((ev.data?.type === 'NEW_TOKEN_RELEASED' || ev.data?.type === 'TOKEN_UPDATED') && ev.data?.token) {
             mergeIncomingToken(ev.data.token);
           }
+          if (ev.data?.type === 'ADMIN_SELECTED_EXAM_CHANGED' && ev.data?.examId) {
+            setSelectedExamForToken(ev.data.examId);
+            try { localStorage.setItem('admin_selected_exam_id', ev.data.examId); } catch (e) {}
+          }
           if (ev.data?.type === 'EXAM_STATUS_UPDATED' && ev.data?.exam) {
             const updatedEx = hydrateRecordTimestamps(ev.data.exam);
             setExams(prev => {
@@ -2401,6 +2505,9 @@ export default function Dashboard() {
             list.forEach((tok: any) => mergeIncomingToken(tok));
           }
         } catch (e) {}
+      }
+      if (ev.key === 'admin_selected_exam_id' && ev.newValue) {
+        setSelectedExamForToken(ev.newValue);
       }
       if (ev.key === 'cached_dashboard_exams' && ev.newValue) {
         try {
@@ -2748,7 +2855,8 @@ export default function Dashboard() {
                     googleFormLink: encryptLink(decryptLink(pe.googleFormLink || ''))
                   }));
 
-                // Terapkan status ujian dari Google Spreadsheet secara seragam ke seluruh pengawas & admin
+                // Terapkan status ujian secara seragam ke seluruh pengawas & admin
+                // Jangan izinkan spreadsheet menimpa izin rilis token yang sudah dibuka Admin
                 setExams(prev => {
                   const exMap = new Map<string, any>();
                   prev.forEach((p: any) => {
@@ -2757,10 +2865,14 @@ export default function Dashboard() {
                   normalizedSheetExams.forEach((se: any) => {
                     const sid = String(se.id).trim();
                     const existing = exMap.get(sid);
-                    const isArchived = Boolean(se.isArchived);
-                    const isActive = se.isActive !== false && !isArchived;
-                    const isTokenReleased = Boolean(se.isTokenReleased && !isArchived);
-                    const adminLocked = Boolean(se.adminLocked || isArchived);
+                    // Otoritas rilis token dan arsip berpatokan pada server/admin:
+                    // Jika soal sudah dibuka/diizinkan di memori/bundle, pertahankan status BUKA
+                    const isArchived = existing && existing.isArchived !== undefined
+                      ? Boolean(existing.isArchived)
+                      : Boolean(se.isArchived);
+                    const isActive = !isArchived && (existing && existing.isActive !== undefined ? Boolean(existing.isActive) : se.isActive !== false);
+                    const isTokenReleased = !isArchived && (existing && existing.isTokenReleased !== undefined ? Boolean(existing.isTokenReleased) : Boolean(se.isTokenReleased));
+                    const adminLocked = isArchived || (existing && existing.adminLocked !== undefined ? Boolean(existing.adminLocked) : Boolean(se.adminLocked));
 
                     exMap.set(sid, {
                       ...existing,
@@ -2770,6 +2882,7 @@ export default function Dashboard() {
                       isActive,
                       isTokenReleased,
                       adminLocked,
+                      duration: se.duration || existing?.duration || 90,
                       tokenReleaseMode: se.tokenReleaseMode || existing?.tokenReleaseMode || 'manual',
                     });
                   });
@@ -6468,6 +6581,18 @@ export default function Dashboard() {
       setExamToken('');
     }
 
+    if (nextAllowRelease) {
+      setSelectedExamForToken(targetId);
+      try {
+        localStorage.setItem('admin_selected_exam_id', targetId);
+        if (typeof BroadcastChannel !== 'undefined') {
+          const bc = new BroadcastChannel('smpn2_token_sync_channel');
+          bc.postMessage({ type: 'ADMIN_SELECTED_EXAM_CHANGED', examId: targetId, timestamp: nowTs });
+          bc.close();
+        }
+      } catch (e) {}
+    }
+
     showToast(
       nextAllowRelease
         ? `✅ Izin Rilis Token untuk "${targetExam.title}" telah DIBUKA! Pengawas kini dapat Generate Token & Siswa dapat masuk ujian.`
@@ -9600,9 +9725,12 @@ export default function Dashboard() {
       ? users.find(u => u.email?.toLowerCase().trim() === simulatedSupervisorEmail.toLowerCase().trim())
       : null;
     const effectiveUid = isGlobalAdminToken ? 'admin' : (simUser?.id || simUser?.uid || user?.uid || userProfile?.uid || userProfile?.id || auth.currentUser?.uid || 'pengawas');
-    const effectiveName = isGlobalAdminToken ? 'Admin Sekolah (Semua Ruang)' : (simUser?.username || userProfile?.username || userProfile?.name || user?.displayName || auth.currentUser?.displayName || 'Pengawas');
-    const effectiveEmail = simUser?.email || user?.email || userProfile?.email || auth.currentUser?.email || '';
-    const effectiveRuang = isGlobalAdminToken ? 'Semua Ruang' : (simUser?.ruang || userProfile?.ruang || 'Ruang Pengawas');
+    const effectiveName = isGlobalAdminToken ? 'Admin Sekolah (Semua Ruang)' : (effectiveSupervisorName || simUser?.username || userProfile?.username || userProfile?.name || user?.displayName || auth.currentUser?.displayName || 'Pengawas');
+    const effectiveEmail = simUser?.email || user?.email || userProfile?.email || effectiveSupervisorEmail || auth.currentUser?.email || '';
+    const effectiveRuang = isGlobalAdminToken ? 'Semua Ruang' : (effectiveSupervisorRuang && effectiveSupervisorRuang !== '-' ? effectiveSupervisorRuang : (simUser?.ruang || userProfile?.ruang || mySupervisorDutyItems[0]?.roomName || 'Ruang 01'));
+
+    const nowTsNum = Date.now();
+    const nowIsoStr = new Date().toISOString();
 
     const newTokenData = {
       code,
@@ -9614,6 +9742,8 @@ export default function Dashboard() {
       creatorName: effectiveName,
       creatorEmail: effectiveEmail,
       creatorRuang: effectiveRuang,
+      releasedAt: nowTsNum,
+      releasedAtIso: nowIsoStr,
       isSmartToken: !isManual,
       isManualToken: isManual,
       isGlobalForAllWindows: isGlobalAdminToken,
@@ -9625,7 +9755,9 @@ export default function Dashboard() {
       id: tokenDocId,
       ...newTokenData,
       expiresAt: expiresAt.getTime(),
-      createdAt: new Date().toISOString()
+      createdAt: nowIsoStr,
+      releasedAt: nowTsNum,
+      releasedAtIso: nowIsoStr
     };
 
     // Update status Ujian lokal agar mencatat token aktif & token admin serta pastikan tidak terarsip
@@ -14006,7 +14138,7 @@ export default function Dashboard() {
                         <select 
                           className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-blue-600 focus:bg-white rounded-xl outline-none text-sm font-bold text-gray-800"
                           value={selectedExamForToken}
-                          onChange={(e) => setSelectedExamForToken(e.target.value)}
+                          onChange={(e) => handleSelectExamForToken(e.target.value)}
                         >
                           <option value="">-- Pilih Ujian --</option>
                           {[...exams]
@@ -14128,6 +14260,139 @@ export default function Dashboard() {
                               <Copy size={15} />
                               <span>Salin Token</span>
                             </button>
+
+                            {/* Live Monitoring Siswa Aktif yang Memakai Token Ini (Pengawas Langsung Memantau) */}
+                            {(() => {
+                              const cleanTok = String(examToken || '').trim().toUpperCase();
+                              const matchedTokenDoc =
+                                tokens.find((t: any) => String(t.code || '').trim().toUpperCase() === cleanTok) ||
+                                studentTokens.find((t: any) => String(t.code || '').trim().toUpperCase() === cleanTok);
+
+                              const details: any[] = Array.isArray(matchedTokenDoc?.usedByDetails) ? matchedTokenDoc.usedByDetails : [];
+
+                              const studentsUsingThisToken = details.map((d: any) => {
+                                const uid = String(d.uid || d.studentId || '');
+                                const studentObj = users.find((u: any) => u.uid === uid || u.id === uid);
+                                const matchViol = violations.find((v: any) =>
+                                  !v.isReset &&
+                                  (v.studentId === uid || (d.name && v.studentName && v.studentName.toLowerCase().trim() === d.name.toLowerCase().trim())) &&
+                                  (v.tokenCode && String(v.tokenCode).toUpperCase().trim() === cleanTok)
+                                );
+
+                                let status = d.status || 'working';
+                                if (matchViol || d.status === 'violation') status = 'violation';
+                                else if (d.finishedAt || d.status === 'finished') status = 'finished';
+
+                                return {
+                                  uid,
+                                  name: d.name || studentObj?.username || studentObj?.name || 'Siswa',
+                                  nis: d.nis || studentObj?.nis || '-',
+                                  kelas: d.kelas || studentObj?.kelas || '-',
+                                  ruang: d.ruang || studentObj?.ruang || '-',
+                                  status,
+                                  isReset: Boolean(d.isReset),
+                                  startedAt: d.timestamp || d.reEnteredAt,
+                                  finishedAt: d.finishedAt,
+                                  violation: matchViol,
+                                };
+                              });
+
+                              const workingCount = studentsUsingThisToken.filter(s => s.status === 'working' || s.status === 'reset').length;
+                              const finishedCount = studentsUsingThisToken.filter(s => s.status === 'finished').length;
+                              const violationCount = studentsUsingThisToken.filter(s => s.status === 'violation').length;
+
+                              return (
+                                <div className="mt-4 pt-4 border-t border-white/20 space-y-3 text-left">
+                                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                                    <div className="flex items-center gap-2">
+                                      <Activity size={16} className="text-emerald-400" />
+                                      <span className="text-xs font-bold text-white uppercase tracking-wider">
+                                        Monitoring Siswa Pengguna Token ({studentsUsingThisToken.length} Siswa Terhubung)
+                                      </span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => setActiveTab('live_monitoring')}
+                                      className="text-[11px] font-bold text-blue-200 hover:text-white underline flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <span>Buka Dashboard Penuh</span>
+                                      <ChevronRight size={13} />
+                                    </button>
+                                  </div>
+
+                                  {/* Stat counters */}
+                                  <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                                    <div className="p-2 rounded-xl bg-emerald-950/60 border border-emerald-400/40">
+                                      <p className="text-[10px] font-bold text-emerald-300 uppercase">Mengerjakan</p>
+                                      <p className="text-lg font-black text-emerald-200">{workingCount}</p>
+                                    </div>
+                                    <div className="p-2 rounded-xl bg-blue-950/60 border border-blue-400/40">
+                                      <p className="text-[10px] font-bold text-blue-300 uppercase">Selesai</p>
+                                      <p className="text-lg font-black text-blue-200">{finishedCount}</p>
+                                    </div>
+                                    <div className="p-2 rounded-xl bg-rose-950/60 border border-rose-400/40">
+                                      <p className="text-[10px] font-bold text-rose-300 uppercase">Kendala</p>
+                                      <p className="text-lg font-black text-rose-200">{violationCount}</p>
+                                    </div>
+                                  </div>
+
+                                  {/* List Siswa */}
+                                  {studentsUsingThisToken.length > 0 ? (
+                                    <div className="max-h-60 overflow-y-auto space-y-1.5 pr-1 text-xs">
+                                      {studentsUsingThisToken.map((st) => (
+                                        <div
+                                          key={st.uid || st.name}
+                                          className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 ${
+                                            st.status === 'violation'
+                                              ? 'bg-rose-950/80 border-rose-400 text-rose-100'
+                                              : st.status === 'finished'
+                                              ? 'bg-blue-950/50 border-blue-400/30 text-blue-100'
+                                              : 'bg-black/30 border-white/10 text-white'
+                                          }`}
+                                        >
+                                          <div className="min-w-0">
+                                            <p className="font-bold truncate text-xs flex items-center gap-1.5">
+                                              <span className={`w-2 h-2 rounded-full shrink-0 ${
+                                                st.status === 'violation' ? 'bg-rose-400 animate-ping' : st.status === 'finished' ? 'bg-blue-400' : 'bg-emerald-400'
+                                              }`} />
+                                              <span className="truncate">{st.name}</span>
+                                            </p>
+                                            <p className="text-[10px] opacity-75 truncate">
+                                              {st.kelas} • NIS: {st.nis} {st.startedAt ? `• Masuk: ${new Date(st.startedAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}` : ''}
+                                            </p>
+                                          </div>
+
+                                          <div className="shrink-0 flex items-center gap-1.5">
+                                            {st.status === 'violation' ? (
+                                              <button
+                                                type="button"
+                                                onClick={() => handleResetStudentToken(matchedTokenDoc?.id || examToken, st.uid, st.name)}
+                                                className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-[10px] rounded-lg shadow-sm cursor-pointer"
+                                                title="Klik untuk membuka kunci siswa agar bisa melanjutkan ujian"
+                                              >
+                                                🔓 Buka Kunci
+                                              </button>
+                                            ) : (
+                                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                                                st.status === 'finished' ? 'bg-blue-500/30 text-blue-200' : 'bg-emerald-500/30 text-emerald-200'
+                                              }`}>
+                                                {st.status === 'finished' ? 'Selesai' : 'Mengerjakan'}
+                                              </span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <div className="p-3 bg-black/20 rounded-xl border border-white/10 text-center">
+                                      <p className="text-[11px] text-blue-200/80">
+                                        Menunggu siswa memasukkan token #{cleanTok}... Saat siswa klik "Mulai", nama dan status pengerjaannya akan muncul langsung di sini.
+                                      </p>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </div>
                         );
                       }
@@ -15137,6 +15402,7 @@ export default function Dashboard() {
             exams={exams}
             rooms={rooms}
             classrooms={classrooms}
+            masterPlan={masterPlan}
             onResetStudentToken={handleResetStudentToken}
             onRefreshData={() => {
               syncStudentExamAndViolationData(undefined, undefined, true);
@@ -16459,7 +16725,7 @@ export default function Dashboard() {
                     <select 
                       className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-blue-600 focus:bg-white rounded-xl outline-none text-sm font-bold text-gray-800"
                       value={selectedExamForToken}
-                      onChange={(e) => setSelectedExamForToken(e.target.value)}
+                      onChange={(e) => handleSelectExamForToken(e.target.value)}
                     >
                       <option value="">-- Pilih Ujian --</option>
                       {[...activeUnarchivedExams]
