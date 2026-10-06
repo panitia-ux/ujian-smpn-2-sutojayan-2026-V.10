@@ -83,6 +83,7 @@ import { UniversalPrintPreviewModal, UniversalPrintDocumentConfig, PrintSubTab }
 import { DataCacheAndBackupCenter } from './components/DataCacheAndBackupCenter';
 import { SpreadsheetDatabasePanel } from './components/SpreadsheetDatabasePanel';
 import LiveMonitoringDashboard from './components/LiveMonitoringDashboard';
+import { recordSupervisorPresence, normalizeSupervisorEmail } from './lib/presenceService';
 import {
   ExamResultsAndAnnouncementPortal,
   StartupAnnouncementPopupModal,
@@ -883,7 +884,7 @@ export default function Dashboard() {
   });
   const [simulatedSupervisorEmail, setSimulatedSupervisorEmail] = useState<string>(() => {
     try {
-      return sessionStorage.getItem('admin_simulation_sup_email') || '';
+      return sessionStorage.getItem('admin_simulation_sup_email') || localStorage.getItem('admin_simulation_sup_email') || '';
     } catch (e) {
       return '';
     }
@@ -1028,6 +1029,16 @@ export default function Dashboard() {
       sessionStorage.setItem('admin_simulation_room', simulatedRoom);
       sessionStorage.setItem('admin_simulation_sup_email', simulatedSupervisorEmail);
       sessionStorage.setItem('admin_simulation_student_id', simulatedStudentId);
+      if (simulatedSupervisorEmail) {
+        localStorage.setItem('admin_simulation_sup_email', simulatedSupervisorEmail);
+        recordSupervisorPresence({
+          email: simulatedSupervisorEmail,
+          name: simulatedSupervisorObj?.username || simulatedSupervisorEmail,
+          uid: simulatedSupervisorObj?.id || simulatedSupervisorObj?.uid,
+          ruang: effectiveSupervisorRuang,
+          role: 'pengawas'
+        }, true, true);
+      }
     } catch (e) {}
 
     // Auto-adjust activeTab if unauthorized in current simulated role
@@ -1042,7 +1053,46 @@ export default function Dashboard() {
         setActiveTab('home');
       }
     }
-  }, [rolePreviewMode, simulatedClass, simulatedRoom, simulatedSupervisorEmail, simulatedStudentId, isActualAdmin]);
+  }, [rolePreviewMode, simulatedClass, simulatedRoom, simulatedSupervisorEmail, simulatedSupervisorObj, simulatedStudentId, isActualAdmin, effectiveSupervisorRuang]);
+
+  // Real-time Heartbeat Presence untuk Pengawas (baik login asli maupun mode simulasi admin)
+  useEffect(() => {
+    const isSup = isPengawas || (rolePreviewMode === 'pengawas' && Boolean(simulatedSupervisorEmail));
+    if (!isSup) return;
+
+    const emailToBroadcast = (rolePreviewMode === 'pengawas' && simulatedSupervisorEmail)
+      ? simulatedSupervisorEmail
+      : (user?.email || userProfile?.email || '');
+    const nameToBroadcast = (rolePreviewMode === 'pengawas' && simulatedSupervisorObj)
+      ? (simulatedSupervisorObj.username || simulatedSupervisorObj.name)
+      : (userProfile?.username || userProfile?.name || user?.displayName);
+    const uidToBroadcast = (rolePreviewMode === 'pengawas' && simulatedSupervisorObj)
+      ? (simulatedSupervisorObj.id || simulatedSupervisorObj.uid)
+      : (user?.uid || userProfile?.uid);
+    const ruangToBroadcast = effectiveSupervisorRuang;
+
+    if (emailToBroadcast || uidToBroadcast) {
+      recordSupervisorPresence({
+        email: emailToBroadcast,
+        name: nameToBroadcast,
+        uid: uidToBroadcast,
+        ruang: ruangToBroadcast,
+        role: 'pengawas'
+      }, true);
+
+      const interval = setInterval(() => {
+        recordSupervisorPresence({
+          email: emailToBroadcast,
+          name: nameToBroadcast,
+          uid: uidToBroadcast,
+          ruang: ruangToBroadcast,
+          role: 'pengawas'
+        }, true);
+      }, 12000);
+
+      return () => clearInterval(interval);
+    }
+  }, [isPengawas, rolePreviewMode, simulatedSupervisorEmail, simulatedSupervisorObj, user?.email, userProfile?.email, userProfile?.username, userProfile?.name, user?.displayName, effectiveSupervisorRuang]);
 
   // Helper to check if a specific feature/menu is allowed for the active user role
   const isSupervisorMenuAllowed = (menuId: string) => {
@@ -13465,10 +13515,23 @@ export default function Dashboard() {
                       <select
                         value={simulatedSupervisorEmail}
                         onChange={(e) => {
-                          setSimulatedSupervisorEmail(e.target.value);
-                          const sup = users.find(u => u.email === e.target.value);
+                          const val = e.target.value;
+                          setSimulatedSupervisorEmail(val);
+                          const sup = users.find(u => (u.email || '').toLowerCase().trim() === (val || '').toLowerCase().trim());
                           if (sup?.ruang) {
                             setSimulatedRoom(sup.ruang);
+                          }
+                          if (val) {
+                            try {
+                              localStorage.setItem('admin_simulation_sup_email', val);
+                            } catch (err) {}
+                            recordSupervisorPresence({
+                              email: val,
+                              name: sup?.username || val,
+                              uid: sup?.id || sup?.uid,
+                              ruang: sup?.ruang || simulatedRoom,
+                              role: 'pengawas'
+                            }, true, true);
                           }
                           showToast(
                             sup ? `Mensimulasikan Pengawas: ${sup.username} (${sup.ruang || simulatedRoom})` : 'Mensimulasikan Pengawas dengan akun Anda sendiri',
@@ -15396,6 +15459,15 @@ export default function Dashboard() {
             effectiveSupervisorEmail={effectiveSupervisorEmail}
             effectiveSupervisorName={effectiveSupervisorName}
             effectiveSupervisorUid={effectiveSupervisorUid}
+            simulatedSupervisorEmail={simulatedSupervisorEmail}
+            onSimulateSupervisor={(email: string) => {
+              const targetSup = users.find(u => (u.email || '').toLowerCase().trim() === (email || '').toLowerCase().trim());
+              setSimulatedSupervisorEmail(email);
+              if (targetSup?.ruang) setSimulatedRoom(targetSup.ruang);
+              setRolePreviewMode('pengawas');
+              setActiveTab('home');
+              showToast(`Mode Simulasi Pengawas Aktif: ${targetSup?.username || email}`, 'info');
+            }}
             tokens={mergeTokenListsWithUsage(tokens, studentTokens)}
             users={users}
             violations={displayViolations}
@@ -19756,7 +19828,21 @@ export default function Dashboard() {
                                     setActiveTab('home');
                                     showToast(`Simulasi Siswa Aktif: ${u.username} (${u.kelas || '-'})`, 'info');
                                   } else {
-                                    setSimulatedSupervisorEmail(u.email || '');
+                                    const targetEmail = u.email || '';
+                                    setSimulatedSupervisorEmail(targetEmail);
+                                    if (u.ruang) setSimulatedRoom(u.ruang);
+                                    if (targetEmail) {
+                                      try {
+                                        localStorage.setItem('admin_simulation_sup_email', targetEmail);
+                                      } catch (err) {}
+                                      recordSupervisorPresence({
+                                        email: targetEmail,
+                                        name: u.username || targetEmail,
+                                        uid: u.id || u.uid,
+                                        ruang: u.ruang,
+                                        role: 'pengawas'
+                                      }, true, true);
+                                    }
                                     setRolePreviewMode('pengawas');
                                     setActiveTab('home');
                                     showToast(`Simulasi Pengawas Aktif: ${u.username}`, 'info');

@@ -13,6 +13,7 @@ import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db, isFirestoreQuotaExhausted, checkAndHandleQuotaError } from './firebase';
 import { isSuperAdminEmail } from './lib/adminConfig';
 import { isDemoUserRecord, hasRealUsersConfigured } from './lib/spreadsheetService';
+import { recordSupervisorPresence } from './lib/presenceService';
 
 interface AuthContextType {
   user: User | null;
@@ -352,6 +353,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       localStorage.setItem(`cached_user_profile_${uid}`, JSON.stringify(mockProfile));
     } catch (e) {}
 
+    if (role === 'pengawas') {
+      recordSupervisorPresence({
+        email: mockProfile.email,
+        name: mockProfile.username,
+        uid: mockProfile.uid,
+        ruang: mockProfile.ruang,
+        role: 'pengawas'
+      }, true, true);
+    }
+
     setUser(mockUser);
     setUserProfile(mockProfile);
     setLoading(false);
@@ -422,6 +433,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }));
       localStorage.setItem(`cached_user_profile_${uid}`, JSON.stringify(mockProfile));
     } catch (e) {}
+
+    if (finalRole === 'pengawas') {
+      recordSupervisorPresence({
+        email: mockProfile.email,
+        name: mockProfile.username,
+        uid: mockProfile.uid,
+        ruang: mockProfile.ruang,
+        role: 'pengawas'
+      }, true, true);
+    }
 
     setUser(mockUser);
     setUserProfile(mockProfile);

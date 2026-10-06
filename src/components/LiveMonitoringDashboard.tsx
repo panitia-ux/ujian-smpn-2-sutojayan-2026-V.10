@@ -23,6 +23,16 @@ import {
   Key
 } from 'lucide-react';
 import { normalizeRoomName } from '../lib/classConstants';
+import {
+  getCachedSupervisorsPresence,
+  getManualOnlineSupervisors,
+  setManualOnlineSupervisor,
+  listenSupervisorsPresence,
+  checkIsSupervisorOnline,
+  normalizeSupervisorEmail,
+  normalizeSupervisorName,
+  SupervisorPresenceRecord
+} from '../lib/presenceService';
 
 export interface StudentMonitoringRecord {
   uid: string;
@@ -83,6 +93,8 @@ interface LiveMonitoringDashboardProps {
   effectiveSupervisorEmail?: string;
   effectiveSupervisorName?: string;
   effectiveSupervisorUid?: string;
+  simulatedSupervisorEmail?: string;
+  onSimulateSupervisor?: (email: string) => void;
   tokens: any[];
   users: any[];
   violations: any[];
@@ -123,6 +135,8 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
   effectiveSupervisorEmail,
   effectiveSupervisorName,
   effectiveSupervisorUid,
+  simulatedSupervisorEmail,
+  onSimulateSupervisor,
   tokens = [],
   users = [],
   violations = [],
@@ -136,6 +150,18 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
 }) => {
   const isAdmin = role === 'admin';
   const isPengawas = role === 'pengawas';
+
+  // Live Supervisor Presence state (Firestore + BroadcastChannel + LocalStorage)
+  const [presenceMap, setPresenceMap] = useState<Record<string, SupervisorPresenceRecord>>(() => getCachedSupervisorsPresence());
+  const [manualOnlineSet, setManualOnlineSet] = useState<Set<string>>(() => getManualOnlineSupervisors());
+
+  useEffect(() => {
+    const cleanup = listenSupervisorsPresence((updatedMap) => {
+      setPresenceMap(updatedMap);
+      setManualOnlineSet(getManualOnlineSupervisors());
+    });
+    return cleanup;
+  }, []);
 
   const targetSupervisorRoom = useMemo(() => {
     const raw = effectiveSupervisorRuang || userProfile?.ruang || (currentUser as any)?.ruang || 'Ruang 01';
@@ -483,13 +509,15 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       const uRuang = rawRuang !== '-' ? rawRuang : (planRoom || '-');
 
       // Cari token yang dirilis oleh pengawas ini (pencocokan cerdas UID, Email, Nama, atau Ruangan Tugas)
+      const normUName = normalizeSupervisorName(uName);
       const myTokens = tokens.filter((t: any) => {
         const matchUid = t.createdBy && (t.createdBy === uUid || t.createdBy === u.id || t.createdBy === u.uid);
-        const matchEmail = uEmail && t.creatorEmail && t.creatorEmail.toLowerCase().trim() === uEmail;
-        const matchName = uName && t.creatorName && (
-          t.creatorName.toLowerCase().trim() === uName.toLowerCase().trim() ||
-          t.creatorName.toLowerCase().includes(uName.toLowerCase().trim()) ||
-          uName.toLowerCase().includes(t.creatorName.toLowerCase().trim())
+        const matchEmail = uEmail && t.creatorEmail && normalizeSupervisorEmail(t.creatorEmail) === uEmail;
+        const normTokName = normalizeSupervisorName(t.creatorName);
+        const matchName = normUName && normTokName && (
+          normTokName === normUName ||
+          normTokName.includes(normUName) ||
+          normUName.includes(normTokName)
         );
         const matchRuang = uRuang !== '-' && t.creatorRuang && normalizeRoomName(t.creatorRuang) === normalizeRoomName(uRuang);
         const matchPlanRoom = planRoom && t.creatorRuang && normalizeRoomName(t.creatorRuang) === normalizeRoomName(planRoom);
@@ -507,31 +535,19 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       const finishedCount = myStudents.filter((s) => s.status === 'finished').length;
       const violationCount = myStudents.filter((s) => s.status === 'violation').length;
 
-      // Cek apakah pengawas ini sedang aktif online / login di browser saat ini
-      const isCurrentSessionOnline = Boolean(
-        (currentUser && (
-          (currentUser.uid && (currentUser.uid === uUid || currentUser.id === uUid)) ||
-          (currentUser.email && String(currentUser.email).toLowerCase().trim() === uEmail) ||
-          (currentUser.username && String(currentUser.username).toLowerCase().trim() === uName.toLowerCase().trim()) ||
-          (currentUser.displayName && String(currentUser.displayName).toLowerCase().trim() === uName.toLowerCase().trim())
-        )) ||
-        (effectiveSupervisorEmail && effectiveSupervisorEmail.toLowerCase().trim() === uEmail) ||
-        (effectiveSupervisorName && effectiveSupervisorName.toLowerCase().trim() === uName.toLowerCase().trim()) ||
-        (effectiveSupervisorUid && (effectiveSupervisorUid === uUid || effectiveSupervisorUid === u.id))
-      );
-
-      // Cek heartbeat presence dari localStorage
-      let hasRecentHeartbeat = false;
-      try {
-        const rawPres = localStorage.getItem('active_supervisors_presence');
-        if (rawPres) {
-          const presObj = JSON.parse(rawPres);
-          const supPres = presObj[uEmail] || presObj[uUid] || presObj[uName.toLowerCase()];
-          if (supPres && typeof supPres.lastActiveMs === 'number' && nowMs - supPres.lastActiveMs < 180000) {
-            hasRecentHeartbeat = true;
-          }
+      // Pengecekan status online pengawas secara real-time & multi-level (Session, Presence Firestore, Broadcast, Simulation, Manual)
+      const isOnline = checkIsSupervisorOnline(
+        u,
+        presenceMap,
+        {
+          currentUserEmail: currentUser?.email,
+          currentUserId: currentUser?.uid || currentUser?.id,
+          currentUserName: currentUser?.username || currentUser?.name || currentUser?.displayName,
+          effectiveEmail: effectiveSupervisorEmail,
+          simulatedEmail: simulatedSupervisorEmail,
+          manualOnlineEmails: manualOnlineSet
         }
-      } catch (e) {}
+      );
 
       const hasReleasedToken = myTokens.length > 0;
       const hasActiveTokens = myTokens.some((t: any) => {
@@ -540,7 +556,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       });
 
       let status: 'active' | 'standby' | 'offline' = 'standby';
-      if (isCurrentSessionOnline || hasRecentHeartbeat || hasReleasedToken || workingCount > 0) {
+      if (isOnline || hasReleasedToken || workingCount > 0) {
         status = 'active';
       } else if (isScheduledToday || planRoom || rawRuang !== '-') {
         status = 'standby';
@@ -591,7 +607,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       if (a.status === 'offline' && b.status === 'standby') return 1;
       return a.ruang.localeCompare(b.ruang);
     });
-  }, [users, tokens, allStudentRecords, exams, masterPlan, currentUser, effectiveSupervisorEmail, effectiveSupervisorName, effectiveSupervisorUid, nowMs]);
+  }, [users, tokens, allStudentRecords, exams, masterPlan, currentUser, effectiveSupervisorEmail, effectiveSupervisorName, effectiveSupervisorUid, simulatedSupervisorEmail, presenceMap, manualOnlineSet, nowMs]);
 
   // Statistik Keseluruhan
   const stats = useMemo(() => {
@@ -1044,6 +1060,34 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                 <span className="w-2 h-2 rounded-full bg-blue-400" />
                 <span>Aktif Online ({stats.activeSupervisorsCount})</span>
               </button>
+
+              {/* Selector Cepat Aktifkan Pengawas Online */}
+              <div className="flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-xl border border-blue-200 shadow-2xs">
+                <span className="text-[11px] font-black text-blue-900 uppercase">Aktivasi:</span>
+                <select
+                  value=""
+                  onChange={(e) => {
+                    if (!e.target.value) return;
+                    const targetEmail = e.target.value;
+                    setManualOnlineSupervisor(targetEmail, true);
+                    setManualOnlineSet(getManualOnlineSupervisors());
+                    setPresenceMap(getCachedSupervisorsPresence());
+                  }}
+                  className="bg-transparent text-gray-800 text-xs font-bold outline-none cursor-pointer max-w-[200px] truncate"
+                >
+                  <option value="">+ Aktifkan Pengawas Online...</option>
+                  {users
+                    .filter((u: any) => {
+                      const r = String(u.role || '').toLowerCase().trim();
+                      return r === 'pengawas' || r === 'guru' || r === 'proktor';
+                    })
+                    .map((u: any) => (
+                      <option key={u.id || u.email} value={u.email}>
+                        {u.username} ({u.email || '-'})
+                      </option>
+                    ))}
+                </select>
+              </div>
             </div>
 
             <div className="w-full sm:w-64">
@@ -1168,6 +1212,40 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                       <p className="text-[10px] font-bold text-rose-800 uppercase">Kendala</p>
                       <p className="text-base font-black text-rose-600">{sup.violationStudents}</p>
                     </div>
+                  </div>
+
+                  {/* Action Bar: Toggle Online & Simulasi */}
+                  <div className="flex items-center gap-2 pt-2 border-t border-gray-100">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextOnline = !isOnline;
+                        setManualOnlineSupervisor(sup.email || '', nextOnline);
+                        setManualOnlineSet(getManualOnlineSupervisors());
+                        setPresenceMap(getCachedSupervisorsPresence());
+                      }}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border flex-1 justify-center ${
+                        isOnline
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100 shadow-2xs'
+                          : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
+                      }`}
+                      title={isOnline ? 'Tandai Offline' : 'Aktifkan Pengawas Ini Agar Terdeteksi Online'}
+                    >
+                      <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500 shadow-[0_0_6px_#10b981]' : 'bg-gray-400'}`} />
+                      <span>{isOnline ? 'Online (Aktif)' : 'Aktifkan Online'}</span>
+                    </button>
+
+                    {onSimulateSupervisor && sup.email && (
+                      <button
+                        type="button"
+                        onClick={() => onSimulateSupervisor(sup.email)}
+                        className="px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shrink-0 shadow-2xs"
+                        title={`Masuk mode simulasi peran sebagai ${sup.name}`}
+                      >
+                        <Eye size={13} />
+                        <span>Simulasi</span>
+                      </button>
+                    )}
                   </div>
 
                   {/* Tombol Lihat Siswa Ruangan */}
