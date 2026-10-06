@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useAuth } from './AuthContext';
-import { db, auth, isFirestoreQuotaExhausted, checkAndHandleQuotaError } from './firebase';
+import { db, auth, isFirestoreQuotaExhausted, checkAndHandleQuotaError, resetFirestoreQuotaCooldown } from './firebase';
 import { updatePassword } from 'firebase/auth';
 import { 
   collection, query, onSnapshot, orderBy, limit, getDocs, getDoc, where, addDoc, doc, setDoc, 
@@ -401,7 +401,7 @@ const mergeTokenListsWithUsage = (...lists: any[][]): any[] => {
   });
 };
 
-const withFirestoreTimeout = <T,>(promise: Promise<T>, timeoutMs = 2800): Promise<T> => {
+const withFirestoreTimeout = <T,>(promise: Promise<T>, timeoutMs = 6000): Promise<T> => {
   if (isFirestoreQuotaExhausted()) {
     return Promise.reject(new Error('FIRESTORE_QUOTA_EXHAUSTED'));
   }
@@ -1489,8 +1489,12 @@ export default function Dashboard() {
     try {
       const targetUrl = customSheetUrl || appSettings?.spreadsheetWebAppUrl || undefined;
 
-      // Helper timeout pendek agar Firebase (Cadangan Ke-2) tidak pernah menahan proses tarik data
-      const withQuickFbTimeout = <T,>(promise: Promise<T>, ms = 2500): Promise<T | null> =>
+      if (!silent) {
+        resetFirestoreQuotaCooldown();
+      }
+
+      // Helper timeout agar Firebase (Cadangan Ke-2) tidak menahan proses tarik data
+      const withQuickFbTimeout = <T,>(promise: Promise<T>, ms = 4500): Promise<T | null> =>
         Promise.race([
           promise.catch((err) => {
             checkAndHandleQuotaError(err);
@@ -1499,14 +1503,14 @@ export default function Dashboard() {
           new Promise<null>((resolve) => setTimeout(() => resolve(null), ms))
         ]);
 
-      // 1. Tarik paralel dari Google Spreadsheet (Utama - Tanpa Kuota) & Firebase (Cadangan Ke-2 dengan timeout pendek)
+      // 1. Tarik paralel dari Google Spreadsheet (Utama - Tanpa Kuota) & Firebase (Cadangan Ke-2)
       const isQuotaFull = isFirestoreQuotaExhausted();
       const [sheetRes, catalogSnapRes, usersSnapRes, bundleSnapRes] = await Promise.allSettled([
         fetchMasterFromSpreadsheet(targetUrl, true, db),
-        !isQuotaFull ? withQuickFbTimeout(getDoc(doc(db, 'settings', 'roster_catalog')), 2500) : Promise.resolve(null),
+        !isQuotaFull ? withQuickFbTimeout(getDoc(doc(db, 'settings', 'roster_catalog')), 4500) : Promise.resolve(null),
         // Hindari query 1200 dokumen individual saat kuota habis untuk menghemat kuota harian
-        !isQuotaFull ? withQuickFbTimeout(getDocs(query(collection(db, 'users'), limit(1200))), 2500) : Promise.resolve(null),
-        !isQuotaFull ? withQuickFbTimeout(getDoc(doc(db, 'settings', 'public_bundle')), 2500) : Promise.resolve(null),
+        !isQuotaFull ? withQuickFbTimeout(getDocs(query(collection(db, 'users'), limit(1200))), 4500) : Promise.resolve(null),
+        !isQuotaFull ? withQuickFbTimeout(getDoc(doc(db, 'settings', 'public_bundle')), 4500) : Promise.resolve(null),
       ]);
 
       // Gabungkan seluruh akun user agar tidak pernah kosong di browser baru
@@ -1565,16 +1569,33 @@ export default function Dashboard() {
           loadedSheetExams = sheetExams.length;
           setExams(prev => {
             const exMap = new Map<string, any>();
-            prev.forEach(e => { if (e?.id && !delSet.has(String(e.id).trim())) exMap.set(e.id, e); });
-            sheetExams.forEach(e => {
-              if (e?.id && !delSet.has(String(e.id).trim())) {
-                const prevItem = exMap.get(e.id);
-                exMap.set(e.id, prevItem ? mergeExamWithLocalOverride(e, prevItem) : e);
+            prev.forEach(e => { if (e?.id && !delSet.has(String(e.id).trim())) exMap.set(String(e.id).trim(), e); });
+            sheetExams.forEach(se => {
+              const sid = String(se.id).trim();
+              if (sid && !delSet.has(sid)) {
+                const prevItem = exMap.get(sid);
+                const isArchived = Boolean(se.isArchived);
+                const isActive = se.isActive !== false && !isArchived;
+                const isTokenReleased = Boolean(se.isTokenReleased && !isArchived);
+                const adminLocked = Boolean(se.adminLocked || isArchived);
+
+                exMap.set(sid, {
+                  ...prevItem,
+                  ...se,
+                  googleFormLink: prevItem?.googleFormLink || se.googleFormLink,
+                  isArchived,
+                  isActive,
+                  isTokenReleased,
+                  adminLocked,
+                  tokenReleaseMode: se.tokenReleaseMode || prevItem?.tokenReleaseMode || 'manual',
+                });
               }
             });
             getCreatedExamsLocally().forEach(ce => {
               const cid = String(ce?.id || '').trim();
-              if (cid && !delSet.has(cid)) exMap.set(cid, mergeExamWithLocalOverride(exMap.get(cid), ce));
+              if (cid && !delSet.has(cid) && !exMap.has(cid)) {
+                exMap.set(cid, ce);
+              }
             });
             const mergedExams = Array.from(exMap.values());
             try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(mergedExams)); } catch (err) {}
@@ -2253,19 +2274,31 @@ export default function Dashboard() {
             const eid = String(e.id || '').trim();
             if (eid) {
               const existing = examMap.get(eid);
+              const isArchived = Boolean(e.isArchived);
+              const isActive = e.isActive !== false && !isArchived;
+              const isTokenReleased = Boolean(e.isTokenReleased && !isArchived);
+              const adminLocked = Boolean(e.adminLocked || isArchived);
+
               const hydratedRemote = {
                 ...existing,
                 ...e,
+                isArchived,
+                isActive,
+                isTokenReleased,
+                adminLocked,
+                tokenReleaseMode: e.tokenReleaseMode || existing?.tokenReleaseMode || 'manual',
+                tokenStatusUpdatedAtMs: e.tokenStatusUpdatedAtMs || existing?.tokenStatusUpdatedAtMs || 0,
                 startTime: typeof e.startTime === 'number' ? Timestamp.fromMillis(e.startTime) : (e.startTime || existing?.startTime),
                 endTime: typeof e.endTime === 'number' ? Timestamp.fromMillis(e.endTime) : (e.endTime || existing?.endTime),
               };
-              examMap.set(eid, existing ? mergeExamWithLocalOverride(hydratedRemote, existing) : hydratedRemote);
+              examMap.set(eid, hydratedRemote);
             }
           });
+        // Hanya tambahkan ujian buatan lokal jika ujian tersebut BELUM pernah ada di bundle server
         getCreatedExamsLocally().forEach((ce: any) => {
           const cid = String(ce?.id || '').trim();
-          if (cid && !delSet.has(cid)) {
-            examMap.set(cid, mergeExamWithLocalOverride(examMap.get(cid), ce));
+          if (cid && !delSet.has(cid) && !examMap.has(cid)) {
+            examMap.set(cid, ce);
           }
         });
         const parsedExams = Array.from(examMap.values());
@@ -2632,6 +2665,8 @@ export default function Dashboard() {
     const isActualStudent = actualRole === 'siswa' || actualRole === 'student' || (!['admin', 'pengawas'].includes(actualRole) && !isSuperAdmin);
     const isActualPengawas = actualRole === 'pengawas';
 
+    let removeVisibilityListeners = () => {};
+
     // 0. Ultra-Hemat Kuota (1-Read Public Bundle) for Students & Supervisors
     const fetchStaticLookupsOnce = async () => {
       try {
@@ -2652,62 +2687,104 @@ export default function Dashboard() {
           setRooms(defaultRms);
         }
 
-        // PEMERIKSAAN KE-1 (UTAMA): Cek Google Spreadsheet untuk DATA_USER, DATA_SOAL & KONFIGURASI (0 Read Firebase)
-        let loadedExamsFromSheet = false;
-        try {
-          const sheetRes = await fetchMasterFromSpreadsheet(appSettings?.spreadsheetWebAppUrl, false, db);
-          if (sheetRes.ok) {
-            if (Array.isArray(sheetRes.users) && sheetRes.users.length > 0) {
-              setUsers(sheetRes.users);
+        // TAHAP 1 (PARALEL): Ambil public_bundle dari Firebase (cepat & memuat izin rilis token Admin terbaru)
+        // dan Spreadsheet secara simultan agar Pengawas tidak menunggu request lambat Google Apps Script.
+        const bundlePromise = (async () => {
+          try {
+            if (!isFirestoreQuotaExhausted()) {
+              const bundleSnap = await withFirestoreTimeout(getDoc(doc(db, 'settings', 'public_bundle')), 5000);
+              if (bundleSnap?.exists?.()) {
+                const bData = bundleSnap.data();
+                if (applyPublicBundleData(bData)) {
+                  return true;
+                }
+              }
             }
-            if (Array.isArray(sheetRes.exams) && sheetRes.exams.length > 0) {
-              const normalizedSheetExams = sheetRes.exams.map((pe: any) => ({
-                ...pe,
-                googleFormLink: encryptLink(decryptLink(pe.googleFormLink || ''))
-              }));
-              setExams(normalizedSheetExams);
-              loadedExamsFromSheet = true;
-            }
-            if (Array.isArray(sheetRes.subjects) && sheetRes.subjects.length > 0) {
-              setSubjects(sheetRes.subjects);
-            }
-            if (Array.isArray(sheetRes.schedules) && sheetRes.schedules.length > 0) {
-              setSchedules(sheetRes.schedules);
-            }
-            if (Array.isArray(sheetRes.masterPlan) && sheetRes.masterPlan.length > 0) {
-              setMasterPlan(sheetRes.masterPlan);
-            }
-            if (sheetRes.appSettings) {
-              setAppSettings((prev: any) => {
-                const merged = sanitizeAppSettingsWithDefaults({
-                  ...prev,
-                  ...sheetRes.appSettings,
-                  exitCountdownSeconds:
-                    sheetRes.appSettings.exitCountdownSeconds !== undefined
-                      ? sheetRes.appSettings.exitCountdownSeconds
-                      : (prev?.exitCountdownSeconds ?? 10),
+          } catch (e) {
+            checkAndHandleQuotaError(e);
+          }
+          return false;
+        })();
+
+        // TAHAP 2 (PARALEL): Ambil data user, jadwal, dan konfigurasi dari Google Spreadsheet
+        const sheetPromise = (async () => {
+          try {
+            const sheetRes = await fetchMasterFromSpreadsheet(appSettings?.spreadsheetWebAppUrl, false, db);
+            if (sheetRes.ok) {
+              if (Array.isArray(sheetRes.users) && sheetRes.users.length > 0) {
+                setUsers(sheetRes.users);
+              }
+              if (Array.isArray(sheetRes.subjects) && sheetRes.subjects.length > 0) {
+                setSubjects(sheetRes.subjects);
+              }
+              if (Array.isArray(sheetRes.schedules) && sheetRes.schedules.length > 0) {
+                setSchedules(sheetRes.schedules);
+              }
+              if (Array.isArray(sheetRes.masterPlan) && sheetRes.masterPlan.length > 0) {
+                setMasterPlan(sheetRes.masterPlan);
+              }
+              if (sheetRes.appSettings) {
+                setAppSettings((prev: any) => {
+                  const merged = sanitizeAppSettingsWithDefaults({
+                    ...prev,
+                    ...sheetRes.appSettings,
+                    exitCountdownSeconds:
+                      sheetRes.appSettings.exitCountdownSeconds !== undefined
+                        ? sheetRes.appSettings.exitCountdownSeconds
+                        : (prev?.exitCountdownSeconds ?? 10),
+                  });
+                  try {
+                    localStorage.setItem('appSettingsCache', JSON.stringify(merged));
+                  } catch (e) {}
+                  return merged;
                 });
-                try {
-                  localStorage.setItem('appSettingsCache', JSON.stringify(merged));
-                } catch (e) {}
-                return merged;
-              });
-            }
-          }
-        } catch (e) {}
+              }
+              if (Array.isArray(sheetRes.exams) && sheetRes.exams.length > 0) {
+                const delSet = getDeletedExamIds();
+                const normalizedSheetExams = sheetRes.exams
+                  .filter((pe: any) => pe && !delSet.has(String(pe.id || '').trim()))
+                  .map((pe: any) => ({
+                    ...pe,
+                    googleFormLink: encryptLink(decryptLink(pe.googleFormLink || ''))
+                  }));
 
-        // PEMERIKSAAN KE-2 (CADANGAN OTOMATIS): For Students & Supervisors: Read 1 single document (`settings/public_bundle`)
-        if (isActualStudent || isActualPengawas) {
-          const bundleSnap = await getDoc(doc(db, 'settings', 'public_bundle'));
-          if (bundleSnap.exists()) {
-            const bData = bundleSnap.data();
-            if (applyPublicBundleData(bData)) {
-              return;
-            }
-          }
-        }
+                // Terapkan status ujian dari Google Spreadsheet secara seragam ke seluruh pengawas & admin
+                setExams(prev => {
+                  const exMap = new Map<string, any>();
+                  prev.forEach((p: any) => {
+                    if (p?.id) exMap.set(String(p.id).trim(), p);
+                  });
+                  normalizedSheetExams.forEach((se: any) => {
+                    const sid = String(se.id).trim();
+                    const existing = exMap.get(sid);
+                    const isArchived = Boolean(se.isArchived);
+                    const isActive = se.isActive !== false && !isArchived;
+                    const isTokenReleased = Boolean(se.isTokenReleased && !isArchived);
+                    const adminLocked = Boolean(se.adminLocked || isArchived);
 
-        // Fallback if public_bundle has not been created yet
+                    exMap.set(sid, {
+                      ...existing,
+                      ...se,
+                      googleFormLink: existing?.googleFormLink || se.googleFormLink,
+                      isArchived,
+                      isActive,
+                      isTokenReleased,
+                      adminLocked,
+                      tokenReleaseMode: se.tokenReleaseMode || existing?.tokenReleaseMode || 'manual',
+                    });
+                  });
+                  const merged = Array.from(exMap.values());
+                  try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(merged)); } catch (e) {}
+                  return merged;
+                });
+              }
+            }
+          } catch (e) {}
+        })();
+
+        await Promise.allSettled([bundlePromise, sheetPromise]);
+
+        // Fallback jika public_bundle belum dibuat sama sekali di Firestore
         if (!isFirestoreQuotaExhausted()) {
           const [subjSnap, planSnap] = await Promise.all([
             getDocs(collection(db, 'subjects')),
@@ -2733,6 +2810,25 @@ export default function Dashboard() {
       hasFetchedLookupsRef.current = true;
       fetchStaticLookupsOnce();
     }
+
+    // Auto-sinkronisasi instan saat Pengawas / Siswa membuka kembali layar HP atau kembali ke tab browser
+    // Mencegah keharusan mematikan / menyalakan ulang HP untuk melihat perubahan rilis token terbaru dari Admin!
+    const handleVisibilityOrFocusChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        resetFirestoreQuotaCooldown();
+        getDoc(doc(db, 'settings', 'public_bundle')).then(snap => {
+          if (snap.exists()) {
+            applyPublicBundleData(snap.data());
+          }
+        }).catch(() => {});
+      }
+    };
+    window.addEventListener('visibilitychange', handleVisibilityOrFocusChange);
+    window.addEventListener('focus', handleVisibilityOrFocusChange);
+    removeVisibilityListeners = () => {
+      window.removeEventListener('visibilitychange', handleVisibilityOrFocusChange);
+      window.removeEventListener('focus', handleVisibilityOrFocusChange);
+    };
 
     // 0.1 Real-time listener on public_bundle untuk seluruh peran (Siswa, Pengawas, Admin)
     // Dokumen tunggal ini (settings/public_bundle) memuat data ujian aktif & token dari server.
@@ -2974,46 +3070,9 @@ export default function Dashboard() {
       }
 
     } else if (isActualPengawas) {
-      // 2. Pengawas: Listen to exams, schedules, and STRICTLY tokens created by this supervisor
-      try {
-        examsUnsub = onSnapshot(collection(db, 'exams'), (snapshot) => {
-          const delSet = getDeletedExamIds();
-          setExams(prev => {
-            const exMap = new Map<string, any>();
-            // Pertahankan daftar ujian dari Google Spreadsheet / cache yang belum ada dokumennya di koleksi Firestore exams
-            prev.forEach((pe: any) => {
-              const pid = String(pe?.id || '').trim();
-              if (pid && !delSet.has(pid)) exMap.set(pid, pe);
-            });
-            snapshot.docs.forEach(d => {
-              const did = String(d.id).trim();
-              if (!delSet.has(did)) {
-                const fsData = d.data();
-                const prevItem = exMap.get(did) || {};
-                exMap.set(did, hydrateRecordTimestamps({ ...prevItem, ...fsData, id: did }));
-              }
-            });
-            getCreatedExamsLocally().forEach((ce: any) => {
-              const cid = String(ce?.id || '').trim();
-              if (cid && !delSet.has(cid)) {
-                exMap.set(cid, mergeExamWithLocalOverride(exMap.get(cid), ce));
-              }
-            });
-            const sorted = dedupeById(
-              Array.from(exMap.values()).sort((a: any, b: any) => {
-                const timeA = a.startTime?.toMillis ? a.startTime.toMillis() : 0;
-                const timeB = b.startTime?.toMillis ? b.startTime.toMillis() : 0;
-                return timeB - timeA;
-              })
-            );
-            try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(sorted)); } catch (e) {}
-            return sorted;
-          });
-        }, (error) => {
-          checkAndHandleQuotaError(error);
-          console.warn("Supervisor Exams snapshot using cache:", error.message);
-        });
-      } catch (e) {}
+      // 2. Pengawas: Listen to schedules, master_plan, and tokens created by this supervisor
+      // Catatan: Ujian disinkronkan secara terpusat melalui fetchStaticLookupsOnce & public_bundle
+      // agar seluruh pengawas dan admin melihat daftar soal ujian yang 100% seragam tanpa selisih!
 
       try {
         schedulesUnsub = onSnapshot(collection(db, 'schedules'), (snapshot) => {
@@ -3265,6 +3324,7 @@ export default function Dashboard() {
       tokensUnsub();
       usersUnsub();
       masterPlanUnsub();
+      removeVisibilityListeners();
     };
   }, [user?.uid, normalizedRole]);
 

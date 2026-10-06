@@ -109,23 +109,24 @@ export const resetFirestoreQuotaCooldown = (): void => {
 };
 
 export const isFirestoreQuotaExhausted = (): boolean => {
-  if (quotaExhaustedInMemory) return true;
   try {
     const until = Number(sessionStorage.getItem(QUOTA_COOLDOWN_KEY) || 0);
     if (until > Date.now()) {
       quotaExhaustedInMemory = true;
       return true;
+    } else {
+      quotaExhaustedInMemory = false;
+      return false;
     }
   } catch (e) {}
-  return false;
+  return quotaExhaustedInMemory;
 };
 
 export const markFirestoreQuotaExhausted = (): void => {
   quotaExhaustedInMemory = true;
   try {
-    // Cooldown 30 menit di sesi browser ini agar aplikasi fokus ke Google Spreadsheet + Cache Lokal
-    // Catatan: Jangan memanggil disableNetwork(db) saat listener aktif karena memicu bug Internal Assertion di Firestore 11.0.1
-    sessionStorage.setItem(QUOTA_COOLDOWN_KEY, String(Date.now() + 30 * 60 * 1000));
+    // Cooldown singkat 60 detik (bukan 30 menit) agar perangkat pengawas/siswa tidak terkunci lama di sessionStorage
+    sessionStorage.setItem(QUOTA_COOLDOWN_KEY, String(Date.now() + 60 * 1000));
   } catch (e) {}
 };
 

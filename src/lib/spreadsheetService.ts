@@ -409,11 +409,6 @@ export const mergeExamWithLocalOverride = (remoteExam: any, localExam: any): any
   const remoteTokenTs = Number(remoteExam.tokenStatusUpdatedAtMs || 0);
   const localTokenTs = Number(localExam.tokenStatusUpdatedAtMs || 0);
 
-  // Status server diutamakan jika server mengaktifkan/membuka ujian dari Bank Soal
-  // atau jika server memiliki timestamp yang lebih baru
-  const isServerRestoredOrActive = remoteExam.isArchived === false && (remoteExam.isActive !== false || remoteExam.isTokenReleased === true);
-  const useLocalTokenState = !isServerRestoredOrActive && localTokenTs > 0 && localTokenTs > remoteTokenTs;
-
   const baseMerged = {
     ...localExam,
     ...remoteExam,
@@ -423,20 +418,30 @@ export const mergeExamWithLocalOverride = (remoteExam: any, localExam: any): any
     duration: remoteExam.duration || localExam.duration || 90,
   };
 
+  // Status server (Firestore / public_bundle) SELALU menjadi rujukan utama yang mutlak
+  // agar seluruh pengawas di semua perangkat melihat status izin rilis token yang 100% seragam
+  const isArchived = remoteExam.isArchived !== undefined
+    ? Boolean(remoteExam.isArchived)
+    : Boolean(localExam.isArchived);
+
+  const isActive = remoteExam.isActive !== undefined
+    ? (remoteExam.isActive !== false && !isArchived)
+    : (localExam.isActive !== false && !isArchived);
+
+  const isTokenReleased = remoteExam.isTokenReleased !== undefined
+    ? Boolean(remoteExam.isTokenReleased && !isArchived)
+    : (!isArchived && !localExam.adminLocked);
+
+  const adminLocked = remoteExam.adminLocked !== undefined
+    ? Boolean(remoteExam.adminLocked || isArchived)
+    : Boolean(localExam.adminLocked || isArchived);
+
   return hydrateRecordTimestamps({
     ...baseMerged,
-    isTokenReleased: useLocalTokenState
-      ? Boolean(localExam.isTokenReleased)
-      : (remoteExam.isTokenReleased !== undefined ? Boolean(remoteExam.isTokenReleased) : (!remoteExam.adminLocked && remoteExam.isActive !== false)),
-    adminLocked: useLocalTokenState
-      ? Boolean(localExam.adminLocked)
-      : Boolean(remoteExam.adminLocked && !remoteExam.isTokenReleased),
-    isActive: useLocalTokenState
-      ? localExam.isActive !== false
-      : (remoteExam.isActive !== false && !remoteExam.isArchived),
-    isArchived: useLocalTokenState
-      ? Boolean(localExam.isArchived)
-      : Boolean(remoteExam.isArchived),
+    isArchived,
+    isActive,
+    isTokenReleased,
+    adminLocked,
     tokenStatusUpdatedAtMs: Math.max(remoteTokenTs, localTokenTs),
   });
 };
