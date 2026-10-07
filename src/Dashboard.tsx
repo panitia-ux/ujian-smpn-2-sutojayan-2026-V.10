@@ -403,7 +403,7 @@ const mergeTokenListsWithUsage = (...lists: any[][]): any[] => {
   });
 };
 
-const withFirestoreTimeout = <T,>(promise: Promise<T>, timeoutMs = 6000): Promise<T> => {
+const withFirestoreTimeout = <T,>(promise: Promise<T>, timeoutMs = 7500): Promise<T> => {
   if (isFirestoreQuotaExhausted()) {
     return Promise.reject(new Error('FIRESTORE_QUOTA_EXHAUSTED'));
   }
@@ -1720,10 +1720,22 @@ export default function Dashboard() {
               const sid = String(se.id).trim();
               if (sid && !delSet.has(sid)) {
                 const prevItem = exMap.get(sid);
-                const isArchived = Boolean(se.isArchived);
-                const isActive = se.isActive !== false && !isArchived;
-                const isTokenReleased = Boolean(se.isTokenReleased && !isArchived);
-                const adminLocked = Boolean(se.adminLocked || isArchived);
+                const prevTokenTs = Number(prevItem?.tokenStatusUpdatedAtMs || 0);
+                const sheetTokenTs = Number(se?.tokenStatusUpdatedAtMs || 0);
+                const preferSheet = sheetTokenTs > 0 && sheetTokenTs >= prevTokenTs;
+
+                const isArchived = preferSheet
+                  ? Boolean(se.isArchived)
+                  : (prevItem && prevItem.isArchived !== undefined ? Boolean(prevItem.isArchived) : Boolean(se.isArchived));
+                const isActive = !isArchived && (preferSheet
+                  ? (se.isActive !== false)
+                  : (prevItem && prevItem.isActive !== undefined ? Boolean(prevItem.isActive) : se.isActive !== false));
+                const isTokenReleased = !isArchived && (preferSheet
+                  ? Boolean(se.isTokenReleased)
+                  : (prevItem && prevItem.isTokenReleased !== undefined ? Boolean(prevItem.isTokenReleased) : Boolean(se.isTokenReleased)));
+                const adminLocked = isArchived || (preferSheet
+                  ? Boolean(se.adminLocked)
+                  : (prevItem && prevItem.adminLocked !== undefined ? Boolean(prevItem.adminLocked) : Boolean(se.adminLocked)));
 
                 exMap.set(sid, {
                   ...prevItem,
@@ -1733,7 +1745,9 @@ export default function Dashboard() {
                   isActive,
                   isTokenReleased,
                   adminLocked,
+                  duration: se.duration || prevItem?.duration || 90,
                   tokenReleaseMode: se.tokenReleaseMode || prevItem?.tokenReleaseMode || 'manual',
+                  tokenStatusUpdatedAtMs: Math.max(prevTokenTs, sheetTokenTs),
                 });
               }
             });
@@ -2192,10 +2206,11 @@ export default function Dashboard() {
     subjects?: any[];
     masterPlan?: any[];
     tokens?: any[];
+    adminSelectedExamId?: string;
   }) => {
     if (isFirestoreQuotaExhausted()) return;
     try {
-      const exList = (overrides?.exams || exams || []).slice(0, 60).map((e: any) => ({
+      const exList = (overrides?.exams || exams || []).slice(0, 150).map((e: any) => ({
         id: e.id,
         title: e.title || '',
         subjectId: e.subjectId || '',
@@ -2212,12 +2227,12 @@ export default function Dashboard() {
         assignments: e.assignments || [],
       }));
 
-      const subList = (overrides?.subjects || subjects || []).slice(0, 60).map((s: any) => ({
+      const subList = (overrides?.subjects || subjects || []).slice(0, 120).map((s: any) => ({
         id: s.id,
         name: s.name || '',
       }));
 
-      const schedList = (overrides?.schedules || schedules || []).slice(0, 80).map((s: any) => ({
+      const schedList = (overrides?.schedules || schedules || []).slice(0, 150).map((s: any) => ({
         id: s.id,
         examTitle: s.examTitle || '',
         subjectId: s.subjectId || '',
@@ -2297,7 +2312,9 @@ export default function Dashboard() {
         subjects: subList,
         schedules: schedList,
         masterPlan: planList,
-        adminSelectedExamId: selectedExamForToken || (typeof localStorage !== 'undefined' ? localStorage.getItem('admin_selected_exam_id') || '' : ''),
+        adminSelectedExamId: overrides?.adminSelectedExamId !== undefined
+          ? overrides.adminSelectedExamId
+          : (selectedExamForToken || (typeof localStorage !== 'undefined' ? localStorage.getItem('admin_selected_exam_id') || '' : '')),
         updatedAt: serverTimestamp(),
       };
       if (appSettings?.spreadsheetWebAppUrl) {
@@ -2340,7 +2357,7 @@ export default function Dashboard() {
           bundlePayload,
           { merge: true }
         ),
-        2800
+        7000
       );
     } catch (e) {
       checkAndHandleQuotaError(e);
@@ -2369,7 +2386,14 @@ export default function Dashboard() {
     let applied = false;
     if (bundle.adminSelectedExamId) {
       try { localStorage.setItem('admin_selected_exam_id', bundle.adminSelectedExamId); } catch (e) {}
-      setSelectedExamForToken(prev => (!prev ? bundle.adminSelectedExamId : prev));
+      setSelectedExamForToken(prev => {
+        const currObj = exams.find(ex => ex.id === prev);
+        const currIsLocked = currObj ? Boolean(currObj.adminLocked && !currObj.isTokenReleased) : false;
+        if (!prev || currIsLocked || prev !== bundle.adminSelectedExamId) {
+          return bundle.adminSelectedExamId;
+        }
+        return prev;
+      });
     }
     if (bundle.spreadsheetWebAppUrl) {
       saveSpreadsheetUrlLocally(bundle.spreadsheetWebAppUrl);
@@ -2455,6 +2479,22 @@ export default function Dashboard() {
         const parsedExams = Array.from(examMap.values());
         if (parsedExams.length > 0 || delSet.size > 0) {
           try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(parsedExams)); } catch (err) {}
+        }
+        // Auto-sinkronisasi pilihan ujian untuk Pengawas jika Admin mengatur ujian tertentu
+        const adminChosenExamId = bundle.adminSelectedExamId ? String(bundle.adminSelectedExamId).trim() : '';
+        if (adminChosenExamId && parsedExams.some(e => e.id === adminChosenExamId && !e.isArchived)) {
+          setSelectedExamForToken(adminChosenExamId);
+          try { localStorage.setItem('admin_selected_exam_id', adminChosenExamId); } catch (e) {}
+        } else {
+          // Jika saat ini belum memilih ujian atau ujian terpilih diarsipkan, pilih ujian pertama yang aktif & siap rilis
+          setSelectedExamForToken(prev => {
+            if (prev && parsedExams.some(e => e.id === prev && !e.isArchived)) {
+              return prev;
+            }
+            const firstReady = parsedExams.find(e => !e.isArchived && !e.adminLocked && e.isTokenReleased) ||
+              parsedExams.find(e => !e.isArchived);
+            return firstReady ? firstReady.id : '';
+          });
         }
         return parsedExams;
       });
@@ -2820,8 +2860,8 @@ export default function Dashboard() {
 
     const actualRole = (userProfile.role || '').toLowerCase().trim();
     const isSuperAdmin = isSuperAdminEmail(user?.email) || isSuperAdminEmail(userProfile?.email);
-    const isActualStudent = actualRole === 'siswa' || actualRole === 'student' || (!['admin', 'pengawas'].includes(actualRole) && !isSuperAdmin);
-    const isActualPengawas = actualRole === 'pengawas';
+    const isActualStudent = actualRole === 'siswa' || actualRole === 'student' || (!['admin', 'pengawas', 'guru'].includes(actualRole) && !isSuperAdmin);
+    const isActualPengawas = actualRole === 'pengawas' || actualRole === 'guru' || isPengawas;
 
     let removeVisibilityListeners = () => {};
 
@@ -2916,26 +2956,8 @@ export default function Dashboard() {
                   normalizedSheetExams.forEach((se: any) => {
                     const sid = String(se.id).trim();
                     const existing = exMap.get(sid);
-                    // Otoritas rilis token dan arsip berpatokan pada server/admin:
-                    // Jika soal sudah dibuka/diizinkan di memori/bundle, pertahankan status BUKA
-                    const isArchived = existing && existing.isArchived !== undefined
-                      ? Boolean(existing.isArchived)
-                      : Boolean(se.isArchived);
-                    const isActive = !isArchived && (existing && existing.isActive !== undefined ? Boolean(existing.isActive) : se.isActive !== false);
-                    const isTokenReleased = !isArchived && (existing && existing.isTokenReleased !== undefined ? Boolean(existing.isTokenReleased) : Boolean(se.isTokenReleased));
-                    const adminLocked = isArchived || (existing && existing.adminLocked !== undefined ? Boolean(existing.adminLocked) : Boolean(se.adminLocked));
-
-                    exMap.set(sid, {
-                      ...existing,
-                      ...se,
-                      googleFormLink: existing?.googleFormLink || se.googleFormLink,
-                      isArchived,
-                      isActive,
-                      isTokenReleased,
-                      adminLocked,
-                      duration: se.duration || existing?.duration || 90,
-                      tokenReleaseMode: se.tokenReleaseMode || existing?.tokenReleaseMode || 'manual',
-                    });
+                    const mergedExam = mergeExamWithLocalOverride(se, existing);
+                    exMap.set(sid, mergedExam);
                   });
                   const merged = Array.from(exMap.values());
                   try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(merged)); } catch (e) {}
@@ -2977,6 +2999,7 @@ export default function Dashboard() {
 
     // Auto-sinkronisasi instan saat Pengawas / Siswa membuka kembali layar HP atau kembali ke tab browser
     // Mencegah keharusan mematikan / menyalakan ulang HP untuk melihat perubahan rilis token terbaru dari Admin!
+    let periodicSyncInterval: any = null;
     const handleVisibilityOrFocusChange = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         resetFirestoreQuotaCooldown();
@@ -2985,13 +3008,67 @@ export default function Dashboard() {
             applyPublicBundleData(snap.data());
           }
         }).catch(() => {});
+
+        // Otomatis segarkan izin rilis ujian dari koleksi exams
+        if (!isFirestoreQuotaExhausted()) {
+          getDocs(collection(db, 'exams')).then(snap => {
+            if (!snap.empty) {
+              const delSet = getDeletedExamIds();
+              setExams(prev => {
+                const exMap = new Map<string, any>();
+                prev.forEach(p => { if (p?.id && !delSet.has(String(p.id).trim())) exMap.set(String(p.id).trim(), p); });
+                snap.docs.forEach(d => {
+                  const did = String(d.id).trim();
+                  if (!delSet.has(did)) {
+                    const fsData = d.data();
+                    const existing = exMap.get(did);
+                    const isArchived = Boolean(fsData.isArchived);
+                    const isActive = fsData.isActive !== false && !isArchived;
+                    const isTokenReleased = Boolean(fsData.isTokenReleased && !isArchived);
+                    const adminLocked = Boolean(fsData.adminLocked || isArchived);
+                    exMap.set(did, {
+                      ...existing,
+                      ...fsData,
+                      id: did,
+                      isArchived,
+                      isActive,
+                      isTokenReleased,
+                      adminLocked,
+                      tokenReleaseMode: fsData.tokenReleaseMode || existing?.tokenReleaseMode || 'manual',
+                      tokenStatusUpdatedAtMs: fsData.tokenStatusUpdatedAtMs || existing?.tokenStatusUpdatedAtMs || 0,
+                    });
+                  }
+                });
+                const merged = Array.from(exMap.values());
+                try { localStorage.setItem('cached_dashboard_exams', JSON.stringify(merged)); } catch (e) {}
+                return merged;
+              });
+            }
+          }).catch(() => {});
+        }
       }
     };
+
+    // Background polling pulse setiap 15 detik agar perangkat lain (HP / Laptop Pengawas)
+    // otomatis mendeteksi perubahan ujian & token dari Admin meski terjadi gangguan WebSocket/latensi jaringan
+    if (!isActualStudent) {
+      periodicSyncInterval = setInterval(() => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'visible' && !isFirestoreQuotaExhausted()) {
+          getDoc(doc(db, 'settings', 'public_bundle')).then(snap => {
+            if (snap.exists()) {
+              applyPublicBundleData(snap.data());
+            }
+          }).catch(() => {});
+        }
+      }, 15000);
+    }
+
     window.addEventListener('visibilitychange', handleVisibilityOrFocusChange);
     window.addEventListener('focus', handleVisibilityOrFocusChange);
     removeVisibilityListeners = () => {
       window.removeEventListener('visibilitychange', handleVisibilityOrFocusChange);
       window.removeEventListener('focus', handleVisibilityOrFocusChange);
+      if (periodicSyncInterval) clearInterval(periodicSyncInterval);
     };
 
     // 0.1 Real-time listener on public_bundle untuk seluruh peran (Siswa, Pengawas, Admin)
@@ -3410,13 +3487,27 @@ export default function Dashboard() {
               if (!delSet.has(did)) {
                 const fsData = d.data();
                 const prevItem = exMap.get(did) || {};
-                exMap.set(did, hydrateRecordTimestamps({ ...prevItem, ...fsData, id: did }));
+                const isArchived = Boolean(fsData.isArchived);
+                const isActive = fsData.isActive !== false && !isArchived;
+                const isTokenReleased = Boolean(fsData.isTokenReleased && !isArchived);
+                const adminLocked = Boolean(fsData.adminLocked || isArchived);
+                exMap.set(did, hydrateRecordTimestamps({
+                  ...prevItem,
+                  ...fsData,
+                  id: did,
+                  isArchived,
+                  isActive,
+                  isTokenReleased,
+                  adminLocked,
+                  tokenReleaseMode: fsData.tokenReleaseMode || prevItem?.tokenReleaseMode || 'manual',
+                  tokenStatusUpdatedAtMs: fsData.tokenStatusUpdatedAtMs || prevItem?.tokenStatusUpdatedAtMs || 0,
+                }));
               }
             });
             getCreatedExamsLocally().forEach((ce: any) => {
               const cid = String(ce?.id || '').trim();
-              if (cid && !delSet.has(cid)) {
-                exMap.set(cid, mergeExamWithLocalOverride(exMap.get(cid), ce));
+              if (cid && !delSet.has(cid) && !exMap.has(cid)) {
+                exMap.set(cid, ce);
               }
             });
             const sorted = dedupeById(
@@ -4092,6 +4183,8 @@ export default function Dashboard() {
       ...payload,
       updatedAt: serverTimestamp()
     };
+    const nextMasterPlan = masterPlan.map(d => d.id === dayId ? { ...d, ...docData } : d);
+    syncPublicBundleToFirestore({ masterPlan: nextMasterPlan }).catch(() => {});
     return withFirestoreTimeout(
       setDoc(doc(db, 'master_plan', dayId), docData, { merge: true }),
       3500
@@ -6444,6 +6537,11 @@ export default function Dashboard() {
       const endTs = Timestamp.fromDate(new Date(selectedExamForEdit.endTime));
       const editedSubjName = subjects.find(s => s.id === selectedExamForEdit.subjectId)?.name || selectedExamForEdit.subjectId || '';
 
+      const savedTokenReleased = selectedExamForEdit.isTokenReleased !== undefined ? Boolean(selectedExamForEdit.isTokenReleased) : true;
+      const savedAdminLocked = selectedExamForEdit.adminLocked !== undefined ? Boolean(selectedExamForEdit.adminLocked) : false;
+      const savedIsArchived = Boolean(selectedExamForEdit.isArchived);
+      const nowTs = Date.now();
+
       const updatedFields = {
         title: selectedExamForEdit.title || '',
         subjectId: selectedExamForEdit.subjectId || '',
@@ -6452,8 +6550,12 @@ export default function Dashboard() {
         startTime: startTs,
         endTime: endTs,
         tokenReleaseMode: selectedExamForEdit.tokenReleaseMode || 'manual',
-        isActive: !!selectedExamForEdit.isActive && !selectedExamForEdit.isArchived,
-        isArchived: Boolean(selectedExamForEdit.isArchived),
+        isActive: !!selectedExamForEdit.isActive && !savedIsArchived,
+        isArchived: savedIsArchived,
+        isTokenReleased: savedTokenReleased,
+        adminLocked: savedAdminLocked,
+        tokenStatusUpdatedAtMs: nowTs,
+        updatedAt: serverTimestamp(),
         assignments: selectedExamForEdit.assignments || []
       };
 
@@ -6469,11 +6571,12 @@ export default function Dashboard() {
       setExams(updatedExamsList);
       try {
         localStorage.setItem('cached_dashboard_exams', JSON.stringify(updatedExamsList));
+        if (typeof BroadcastChannel !== 'undefined') {
+          const bc = new BroadcastChannel('smpn2_token_sync_channel');
+          bc.postMessage({ type: 'EXAM_STATUS_UPDATED', exam: updatedExamObj, timestamp: nowTs });
+          bc.close();
+        }
       } catch (e) {}
-
-      const savedTokenReleased = selectedExamForEdit.isTokenReleased;
-      const savedAdminLocked = selectedExamForEdit.adminLocked;
-      const savedIsArchived = selectedExamForEdit.isArchived;
 
       setIsUpdatingExam(false);
       setShowEditExam(false);
@@ -6483,7 +6586,7 @@ export default function Dashboard() {
       Promise.allSettled([
         withFirestoreTimeout(
           setDoc(doc(db, 'exams', targetId), updatedFields, { merge: true }),
-          2800
+          7000
         ),
         upsertExamToSpreadsheet({
           id: targetId,
@@ -6727,7 +6830,7 @@ export default function Dashboard() {
         },
         appSettings?.spreadsheetWebAppUrl
       ),
-      syncPublicBundleToFirestore({ exams: nextExamsList }),
+      syncPublicBundleToFirestore({ exams: nextExamsList, adminSelectedExamId: nextAllowRelease ? targetId : '' }),
     ]).catch(() => {});
   };
 
@@ -6885,7 +6988,7 @@ export default function Dashboard() {
         },
         appSettings?.spreadsheetWebAppUrl
       ),
-      syncPublicBundleToFirestore({ exams: nextExamsList }),
+      syncPublicBundleToFirestore({ exams: nextExamsList, adminSelectedExamId: nextActive ? targetId : '' }),
     ]).catch(() => {});
   };
 
@@ -7146,7 +7249,12 @@ export default function Dashboard() {
       } catch (e) {}
 
       const syncOps: Promise<any>[] = [];
-      syncOps.push(syncPublicBundleToFirestore({ exams: currentExams }));
+      syncOps.push(syncPublicBundleToFirestore({ 
+        exams: currentExams, 
+        subjects, 
+        schedules, 
+        masterPlan 
+      }));
 
       currentExams.filter(e => !e.isArchived).forEach((ex: any) => {
         const { id: exId, ...fsFields } = ex;
@@ -7158,21 +7266,26 @@ export default function Dashboard() {
                 updatedAt: serverTimestamp(),
                 tokenStatusUpdatedAtMs: nowTs
               }, { merge: true }),
-              3000
+              7000
             )
           );
         }
       });
 
       if (appSettings?.spreadsheetWebAppUrl) {
-        currentExams.filter(e => !e.isArchived).forEach((ex: any) => {
-          syncOps.push(
-            upsertExamToSpreadsheet({
+        syncOps.push(
+          pushAllMasterToSpreadsheet(appSettings.spreadsheetWebAppUrl, {
+            users,
+            exams: currentExams.map(ex => ({
               ...ex,
               rawLink: decryptLink(ex.googleFormLink || ex.link || ''),
-            }, appSettings.spreadsheetWebAppUrl)
-          );
-        });
+            })),
+            subjects,
+            schedules,
+            masterPlan,
+            appSettings,
+          })
+        );
       }
 
       await Promise.allSettled(syncOps);
@@ -7188,7 +7301,7 @@ export default function Dashboard() {
         bc.close();
       }
 
-      showToast('📤 Status seluruh ujian berhasil dikirim ke Server (Firestore & Spreadsheet)! Seluruh Pengawas otomatis tersinkronisasi.', 'success');
+      showToast('📤 Status seluruh ujian & izin rilis token berhasil dikirim ke Server (Firestore & Spreadsheet)! Seluruh Pengawas di perangkat lain otomatis tersinkron.', 'success');
     } catch (err: any) {
       console.warn("Error pushing exam status:", err);
       showToast('Status ujian disimpan di cache & dikirim ke server.', 'info');
@@ -7209,11 +7322,11 @@ export default function Dashboard() {
 
       try {
         const [examSnap, bundleSnap] = await Promise.allSettled([
-          withFirestoreTimeout(getDocs(collection(db, 'exams')), 3000),
-          withFirestoreTimeout(getDoc(doc(db, 'settings', 'public_bundle')), 2500)
+          withFirestoreTimeout(getDocs(collection(db, 'exams')), 6500),
+          withFirestoreTimeout(getDoc(doc(db, 'settings', 'public_bundle')), 6500)
         ]);
 
-        if (bundleSnap.status === 'fulfilled' && bundleSnap.value.exists()) {
+        if (bundleSnap.status === 'fulfilled' && bundleSnap.value && bundleSnap.value.exists()) {
           const bData = bundleSnap.value.data();
           applyPublicBundleData(bData);
           if (Array.isArray(bData?.exams) && bData.exams.length > 0) {
@@ -7222,7 +7335,7 @@ export default function Dashboard() {
           }
         }
 
-        if (examSnap.status === 'fulfilled' && !examSnap.value.empty) {
+        if (examSnap.status === 'fulfilled' && examSnap.value && !examSnap.value.empty) {
           const delSet = getDeletedExamIds();
           const fromCollection = examSnap.value.docs
             .map(d => ({ ...d.data(), id: d.id }))
@@ -7249,6 +7362,9 @@ export default function Dashboard() {
           if (Array.isArray(sheetRes.masterPlan) && sheetRes.masterPlan.length > 0) {
             setMasterPlan(sheetRes.masterPlan);
           }
+          if (Array.isArray(sheetRes.schedules) && sheetRes.schedules.length > 0) {
+            setSchedules(sheetRes.schedules);
+          }
         }
       }
 
@@ -7266,7 +7382,7 @@ export default function Dashboard() {
 
         const activeExamCandidate = cleanExams.find((e: any) => !e.isArchived && !e.adminLocked && e.isTokenReleased) ||
           cleanExams.find((e: any) => !e.isArchived);
-        if (activeExamCandidate && !selectedExamForToken) {
+        if (activeExamCandidate) {
           setSelectedExamForToken(activeExamCandidate.id);
         }
 
@@ -14396,14 +14512,30 @@ export default function Dashboard() {
                           <label className="text-xs font-bold text-gray-600 uppercase">
                             Pilih Ujian
                           </label>
-                          <button
-                            type="button"
-                            onClick={() => handlePullAllMasterData(false)}
-                            className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer"
-                          >
-                            <RefreshCw size={11} className={isPullingMasterData ? 'animate-spin' : ''} />
-                            <span>Segarkan</span>
-                          </button>
+                          <div className="flex items-center gap-2">
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                onClick={handlePushExamStatusToServer}
+                                disabled={isPushingExamStatusToServer}
+                                className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                title="Kirim status rilis ujian ke server"
+                              >
+                                <CloudUpload size={12} className={isPushingExamStatusToServer ? 'animate-bounce' : ''} />
+                                <span>{isPushingExamStatusToServer ? 'Mengirim...' : 'Kirim ke Server'}</span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={handlePullExamStatusFromServer}
+                              disabled={isPullingExamStatusFromServer}
+                              className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                              title="Tarik status izin ujian terbaru dari server"
+                            >
+                              <RefreshCw size={11} className={isPullingExamStatusFromServer ? 'animate-spin' : ''} />
+                              <span>{isPullingExamStatusFromServer ? 'Menarik...' : 'Tarik dari Server'}</span>
+                            </button>
+                          </div>
                         </div>
                         <select 
                           className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-blue-600 focus:bg-white rounded-xl outline-none text-sm font-bold text-gray-800"
@@ -16225,8 +16357,29 @@ export default function Dashboard() {
                     >
                       <Upload size={16} /> Upload Masal
                     </button>
+                    <button 
+                      type="button"
+                      onClick={handlePushExamStatusToServer}
+                      disabled={isPushingExamStatusToServer}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-2.5 rounded-xl flex items-center gap-1.5 text-xs font-bold transition-all shadow-md shadow-indigo-100 disabled:opacity-60 cursor-pointer"
+                      title="Kirim seluruh jadwal & master plan ke Server Firestore & Google Spreadsheet"
+                    >
+                      <CloudUpload size={15} className={isPushingExamStatusToServer ? 'animate-bounce' : ''} />
+                      <span>{isPushingExamStatusToServer ? 'Mengirim...' : '📤 Kirim Jadwal ke Server'}</span>
+                    </button>
                   </>
                 )}
+
+                <button 
+                  type="button"
+                  onClick={handlePullExamStatusFromServer}
+                  disabled={isPullingExamStatusFromServer}
+                  className="bg-sky-600 hover:bg-sky-700 text-white px-3.5 py-2.5 rounded-xl flex items-center gap-1.5 text-xs font-bold transition-all shadow-md shadow-sky-100 disabled:opacity-60 cursor-pointer"
+                  title="Tarik jadwal & status ujian terbaru dari Server"
+                >
+                  <CloudDownload size={15} className={isPullingExamStatusFromServer ? 'animate-spin' : ''} />
+                  <span>{isPullingExamStatusFromServer ? 'Menarik...' : '📥 Tarik Jadwal'}</span>
+                </button>
 
                 <button 
                   onClick={() =>
@@ -16927,6 +17080,30 @@ export default function Dashboard() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2.5">
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={handlePushExamStatusToServer}
+                    disabled={isPushingExamStatusToServer}
+                    className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white px-4 py-2 rounded-xl flex items-center justify-center gap-2 text-xs font-extrabold transition-all cursor-pointer shadow-sm disabled:opacity-60"
+                    title="Kirim status izin rilis ujian dan status aktif ke Firestore & Spreadsheet"
+                  >
+                    <CloudUpload size={16} className={isPushingExamStatusToServer ? 'animate-bounce' : ''} />
+                    <span>{isPushingExamStatusToServer ? 'Mengirim ke Server...' : '📤 Kirim ke Server'}</span>
+                  </button>
+                )}
+                {(isAdmin || isPengawas) && (
+                  <button
+                    type="button"
+                    onClick={handlePullExamStatusFromServer}
+                    disabled={isPullingExamStatusFromServer}
+                    className="w-full sm:w-auto bg-sky-600 hover:bg-sky-700 active:bg-sky-800 text-white px-4 py-2 rounded-xl flex items-center justify-center gap-2 text-xs font-extrabold transition-all cursor-pointer shadow-sm disabled:opacity-60"
+                    title="Tarik data izin rilis ujian terbaru dari Server"
+                  >
+                    <CloudDownload size={16} className={isPullingExamStatusFromServer ? 'animate-spin' : ''} />
+                    <span>{isPullingExamStatusFromServer ? 'Menarik Data...' : '📥 Tarik Data'}</span>
+                  </button>
+                )}
                 {(isAdmin || (isPengawas && appSettings.allowSupervisorAddExam)) && (
                   <button
                     type="button"
@@ -16992,14 +17169,30 @@ export default function Dashboard() {
                       <label className="text-xs font-bold text-gray-600 uppercase">
                         Pilih Ujian
                       </label>
-                      <button
-                        type="button"
-                        onClick={() => handlePullAllMasterData(false)}
-                        className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer"
-                      >
-                        <RefreshCw size={11} className={isPullingMasterData ? 'animate-spin' : ''} />
-                        <span>Segarkan</span>
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={handlePushExamStatusToServer}
+                            disabled={isPushingExamStatusToServer}
+                            className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            title="Kirim status rilis ujian ke server"
+                          >
+                            <CloudUpload size={12} className={isPushingExamStatusToServer ? 'animate-bounce' : ''} />
+                            <span>{isPushingExamStatusToServer ? 'Mengirim...' : 'Kirim ke Server'}</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handlePullExamStatusFromServer}
+                          disabled={isPullingExamStatusFromServer}
+                          className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          title="Tarik status izin ujian terbaru dari server"
+                        >
+                          <RefreshCw size={11} className={isPullingExamStatusFromServer ? 'animate-spin' : ''} />
+                          <span>{isPullingExamStatusFromServer ? 'Menarik...' : 'Tarik dari Server'}</span>
+                        </button>
+                      </div>
                     </div>
                     <select 
                       className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-blue-600 focus:bg-white rounded-xl outline-none text-sm font-bold text-gray-800"

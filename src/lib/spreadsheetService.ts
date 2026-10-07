@@ -418,23 +418,29 @@ export const mergeExamWithLocalOverride = (remoteExam: any, localExam: any): any
     duration: remoteExam.duration || localExam.duration || 90,
   };
 
-  // Status server (Firestore / public_bundle) SELALU menjadi rujukan utama yang mutlak
-  // agar seluruh pengawas di semua perangkat melihat status izin rilis token yang 100% seragam
-  const isArchived = remoteExam.isArchived !== undefined
-    ? Boolean(remoteExam.isArchived)
-    : Boolean(localExam.isArchived);
+  // Jika entri lokal memiliki timestamp pembaruan status token yang lebih baru dari data spreadsheet/remote,
+  // pertahankan status izin rilis token dari lokal (yang berasal dari Firestore / public_bundle).
+  const preferLocal = localTokenTs > 0 && localTokenTs > remoteTokenTs;
 
-  const isActive = remoteExam.isActive !== undefined
-    ? (remoteExam.isActive !== false && !isArchived)
-    : (localExam.isActive !== false && !isArchived);
+  const isArchived = preferLocal
+    ? Boolean(localExam.isArchived)
+    : (remoteExam.isArchived !== undefined ? Boolean(remoteExam.isArchived) : Boolean(localExam.isArchived));
 
-  const isTokenReleased = remoteExam.isTokenReleased !== undefined
-    ? Boolean(remoteExam.isTokenReleased && !isArchived)
-    : (!isArchived && !localExam.adminLocked);
+  const isActive = preferLocal
+    ? (localExam.isActive !== false && !isArchived)
+    : (remoteExam.isActive !== undefined ? (remoteExam.isActive !== false && !isArchived) : (localExam.isActive !== false && !isArchived));
 
-  const adminLocked = remoteExam.adminLocked !== undefined
-    ? Boolean(remoteExam.adminLocked || isArchived)
-    : Boolean(localExam.adminLocked || isArchived);
+  const isTokenReleased = preferLocal
+    ? Boolean(localExam.isTokenReleased && !isArchived)
+    : (remoteExam.isTokenReleased !== undefined
+        ? Boolean(remoteExam.isTokenReleased && !isArchived)
+        : (!isArchived && Boolean(localExam.isTokenReleased || !localExam.adminLocked)));
+
+  const adminLocked = isArchived || (preferLocal
+    ? Boolean(localExam.adminLocked)
+    : (remoteExam.adminLocked !== undefined
+        ? Boolean(remoteExam.adminLocked)
+        : Boolean(localExam.adminLocked)));
 
   return hydrateRecordTimestamps({
     ...baseMerged,
