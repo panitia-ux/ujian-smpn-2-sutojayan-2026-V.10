@@ -1388,6 +1388,262 @@ export default function Dashboard() {
     }
   };
 
+  // Mode pengurutan & filter tingkat kelas untuk dropdown Pilih Ujian (Generate Token)
+  const [tokenExamSortMode, setTokenExamSortMode] = useState<'combined' | 'name' | 'selected'>(() => {
+    try {
+      const saved = localStorage.getItem('token_exam_sort_mode');
+      if (saved === 'combined' || saved === 'name' || saved === 'selected') return saved;
+    } catch (e) {}
+    return 'combined';
+  });
+
+  const [tokenExamGradeFilter, setTokenExamGradeFilter] = useState<'ALL' | '7' | '8' | '9'>(() => {
+    try {
+      const saved = localStorage.getItem('token_exam_grade_filter');
+      if (saved === 'ALL' || saved === '7' || saved === '8' || saved === '9') return saved;
+    } catch (e) {}
+    return 'ALL';
+  });
+
+  const handleSetTokenExamSortMode = (mode: 'combined' | 'name' | 'selected') => {
+    setTokenExamSortMode(mode);
+    try { localStorage.setItem('token_exam_sort_mode', mode); } catch (e) {}
+  };
+
+  const handleSetTokenExamGradeFilter = (grade: 'ALL' | '7' | '8' | '9') => {
+    setTokenExamGradeFilter(grade);
+    try { localStorage.setItem('token_exam_grade_filter', grade); } catch (e) {}
+  };
+
+  const extractGradeFromExamTitle = (title: string): string => {
+    const t = String(title || '').trim();
+    if (/^(7\b|7\s|VII\b|Kelas\s*7\b|Kelas\s*VII\b)/i.test(t)) return '7';
+    if (/^(8\b|8\s|VIII\b|Kelas\s*8\b|Kelas\s*VIII\b)/i.test(t)) return '8';
+    if (/^(9\b|9\s|IX\b|Kelas\s*9\b|Kelas\s*IX\b)/i.test(t)) return '9';
+    return 'other';
+  };
+
+  const tokenExamGradeCounts = useMemo(() => {
+    const active = exams.filter(e => !e.isArchived);
+    let g7 = 0;
+    let g8 = 0;
+    let g9 = 0;
+    active.forEach(e => {
+      const g = extractGradeFromExamTitle(e.title);
+      if (g === '7') g7++;
+      else if (g === '8') g8++;
+      else if (g === '9') g9++;
+    });
+    return { all: active.length, g7, g8, g9 };
+  }, [exams]);
+
+  const renderTokenExamToolbarControls = () => (
+    <div className="flex flex-wrap items-center justify-between gap-2 pt-1 pb-1 text-xs">
+      {/* Filter Kelas Cepat */}
+      <div className="flex items-center gap-1 bg-gray-100 p-0.5 rounded-xl border border-gray-200">
+        <button
+          type="button"
+          onClick={() => handleSetTokenExamGradeFilter('ALL')}
+          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+            tokenExamGradeFilter === 'ALL'
+              ? 'bg-blue-600 text-white shadow-xs'
+              : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'
+          }`}
+          title="Tampilkan seluruh kelas (7, 8, dan 9)"
+        >
+          Semua ({tokenExamGradeCounts.all})
+        </button>
+        <button
+          type="button"
+          onClick={() => handleSetTokenExamGradeFilter('7')}
+          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+            tokenExamGradeFilter === '7'
+              ? 'bg-blue-600 text-white shadow-xs'
+              : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'
+          }`}
+          title="Tampilkan hanya mata ujian Kelas 7"
+        >
+          Kls 7 ({tokenExamGradeCounts.g7})
+        </button>
+        <button
+          type="button"
+          onClick={() => handleSetTokenExamGradeFilter('8')}
+          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+            tokenExamGradeFilter === '8'
+              ? 'bg-blue-600 text-white shadow-xs'
+              : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'
+          }`}
+          title="Tampilkan hanya mata ujian Kelas 8"
+        >
+          Kls 8 ({tokenExamGradeCounts.g8})
+        </button>
+        <button
+          type="button"
+          onClick={() => handleSetTokenExamGradeFilter('9')}
+          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+            tokenExamGradeFilter === '9'
+              ? 'bg-blue-600 text-white shadow-xs'
+              : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'
+          }`}
+          title="Tampilkan hanya mata ujian Kelas 9"
+        >
+          Kls 9 ({tokenExamGradeCounts.g9})
+        </button>
+      </div>
+
+      {/* Mode Pengurutan */}
+      <div className="flex items-center gap-1.5 ml-auto">
+        <span className="text-[10px] font-extrabold uppercase text-gray-500 whitespace-nowrap">Urutan:</span>
+        <select
+          value={tokenExamSortMode}
+          onChange={(e) => handleSetTokenExamSortMode(e.target.value as any)}
+          className="text-[11px] font-bold text-gray-800 bg-white border border-gray-200 hover:border-blue-500 rounded-lg px-2.5 py-1 outline-none cursor-pointer shadow-2xs"
+          title="Pilih mode pengurutan daftar ujian"
+        >
+          <option value="combined">🔀 Penggabungan (Terpilih + Siap Rilis + Kls 7-8-9)</option>
+          <option value="name">🔤 Sesuai Nama (A - Z / Kelas 7, 8, 9)</option>
+          <option value="selected">⭐ Sesuai yang Dipilih (Di Paling Atas)</option>
+        </select>
+      </div>
+    </div>
+  );
+
+  const renderTokenExamSelectOptions = (examSourceList: any[]) => {
+    const activeList = (examSourceList || []).filter(e => !e.isArchived);
+    if (activeList.length === 0) {
+      return <option value="">-- Tidak ada ujian aktif --</option>;
+    }
+
+    const filteredList = activeList.filter(e => {
+      if (tokenExamGradeFilter === 'ALL') return true;
+      return extractGradeFromExamTitle(e.title) === tokenExamGradeFilter;
+    });
+
+    const naturalCompare = (a: any, b: any) =>
+      (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+
+    // Mode 1: Sesuai Nama (A-Z murni / Kelas 7 -> 8 -> 9 berurutan)
+    if (tokenExamSortMode === 'name') {
+      const sorted = [...filteredList].sort(naturalCompare);
+      return (
+        <>
+          <option value="">-- Pilih Ujian ({sorted.length} Soal Tersedia) --</option>
+          {sorted.map(e => {
+            const isAllowed = Boolean(!e.adminLocked || e.isTokenReleased);
+            const isSelected = e.id === selectedExamForToken;
+            return (
+              <option key={e.id} value={e.id}>
+                {isAllowed ? '🟢 ' : '🔒 '}
+                {e.title}
+                {isSelected ? ' ⭐ (Sedang Dipilih)' : ''}
+              </option>
+            );
+          })}
+        </>
+      );
+    }
+
+    // Mode 2: Sesuai yang Dipilih (Ujian terpilih ditaruh paling atas)
+    if (tokenExamSortMode === 'selected') {
+      const sorted = [...filteredList].sort((a, b) => {
+        const aSelected = a.id === selectedExamForToken ? 1 : 0;
+        const bSelected = b.id === selectedExamForToken ? 1 : 0;
+        if (aSelected !== bSelected) return bSelected - aSelected;
+
+        const aReady = !a.adminLocked || a.isTokenReleased ? 1 : 0;
+        const bReady = !b.adminLocked || b.isTokenReleased ? 1 : 0;
+        if (aReady !== bReady) return bReady - aReady;
+
+        return naturalCompare(a, b);
+      });
+      return (
+        <>
+          <option value="">-- Pilih Ujian ({sorted.length} Soal Tersedia) --</option>
+          {sorted.map(e => {
+            const isAllowed = Boolean(!e.adminLocked || e.isTokenReleased);
+            const isSelected = e.id === selectedExamForToken;
+            return (
+              <option key={e.id} value={e.id}>
+                {isSelected ? '⭐ ' : isAllowed ? '🟢 ' : '🔒 '}
+                {e.title}
+                {isSelected ? ' (Sedang Dipilih)' : ''}
+              </option>
+            );
+          })}
+        </>
+      );
+    }
+
+    // Mode 3: Penggabungan (Default - Cerdas & Berkelompok Rapi)
+    const readyList = filteredList.filter(e => !e.adminLocked || e.isTokenReleased);
+    const lockedList = filteredList.filter(e => e.adminLocked && !e.isTokenReleased).sort(naturalCompare);
+
+    const grade7List = readyList.filter(e => extractGradeFromExamTitle(e.title) === '7').sort(naturalCompare);
+    const grade8List = readyList.filter(e => extractGradeFromExamTitle(e.title) === '8').sort(naturalCompare);
+    const grade9List = readyList.filter(e => extractGradeFromExamTitle(e.title) === '9').sort(naturalCompare);
+    const otherList = readyList.filter(e => extractGradeFromExamTitle(e.title) === 'other').sort(naturalCompare);
+
+    const renderOption = (e: any) => {
+      const isAllowed = Boolean(!e.adminLocked || e.isTokenReleased);
+      const isSelected = e.id === selectedExamForToken;
+      return (
+        <option key={e.id} value={e.id}>
+          {isAllowed ? '🟢 ' : '🔒 '}
+          {e.title}
+          {isSelected ? ' ⭐ (Sedang Dipilih)' : ''}
+        </option>
+      );
+    };
+
+    return (
+      <>
+        <option value="">-- Pilih Ujian ({filteredList.length} Soal Tersedia) --</option>
+        {tokenExamGradeFilter !== 'ALL' ? (
+          <>
+            {readyList.length > 0 && (
+              <optgroup label={`🟢 SIAP RILIS - KELAS ${tokenExamGradeFilter} (${readyList.length} Ujian)`}>
+                {readyList.sort(naturalCompare).map(renderOption)}
+              </optgroup>
+            )}
+            {lockedList.length > 0 && (
+              <optgroup label={`🔒 DIKUNCI ADMIN - KELAS ${tokenExamGradeFilter} (${lockedList.length} Ujian)`}>
+                {lockedList.map(renderOption)}
+              </optgroup>
+            )}
+          </>
+        ) : (
+          <>
+            {grade7List.length > 0 && (
+              <optgroup label={`🟢 KELAS 7 (SIAP RILIS - ${grade7List.length} Ujian)`}>
+                {grade7List.map(renderOption)}
+              </optgroup>
+            )}
+            {grade8List.length > 0 && (
+              <optgroup label={`🟢 KELAS 8 (SIAP RILIS - ${grade8List.length} Ujian)`}>
+                {grade8List.map(renderOption)}
+              </optgroup>
+            )}
+            {grade9List.length > 0 && (
+              <optgroup label={`🟢 KELAS 9 (SIAP RILIS - ${grade9List.length} Ujian)`}>
+                {grade9List.map(renderOption)}
+              </optgroup>
+            )}
+            {otherList.length > 0 && (
+              <optgroup label={`🟢 MATA UJIAN LAINNYA (${otherList.length} Ujian)`}>
+                {otherList.map(renderOption)}
+              </optgroup>
+            )}
+            {lockedList.length > 0 && (
+              <optgroup label={`🔒 DIKUNCI ADMIN (BELUM DIIZINKAN - ${lockedList.length} Ujian)`}>
+                {lockedList.map(renderOption)}
+              </optgroup>
+            )}
+          </>
+        )}
+      </>
+    );
+  };
+
   // Otomatis sinkronkan & pilih ujian aktif terbaru yang diizinkan Admin saat browser baru dibuka
   useEffect(() => {
     if (exams.length === 0) return;
@@ -14537,28 +14793,13 @@ export default function Dashboard() {
                             </button>
                           </div>
                         </div>
+                        {renderTokenExamToolbarControls()}
                         <select 
-                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-blue-600 focus:bg-white rounded-xl outline-none text-sm font-bold text-gray-800"
+                          className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-blue-600 focus:bg-white rounded-xl outline-none text-sm font-bold text-gray-800 transition-all cursor-pointer shadow-2xs"
                           value={selectedExamForToken}
                           onChange={(e) => handleSelectExamForToken(e.target.value)}
                         >
-                          <option value="">-- Pilih Ujian --</option>
-                          {[...exams]
-                            .filter(e => !e.isArchived)
-                            .sort((a, b) => {
-                              const aReady = !a.adminLocked || a.isTokenReleased ? 1 : 0;
-                              const bReady = !b.adminLocked || b.isTokenReleased ? 1 : 0;
-                              return bReady - aReady;
-                            })
-                            .map(e => {
-                              const isAllowed = Boolean(!e.adminLocked || e.isTokenReleased);
-                              return (
-                                <option key={e.id} value={e.id}>
-                                  {isAllowed ? '🟢 ' : '🔒 '}
-                                  {e.title}
-                                </option>
-                              );
-                            })}
+                          {renderTokenExamSelectOptions(exams)}
                         </select>
                       </div>
 
@@ -17211,27 +17452,13 @@ export default function Dashboard() {
                         </button>
                       </div>
                     </div>
+                    {renderTokenExamToolbarControls()}
                     <select 
-                      className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-blue-600 focus:bg-white rounded-xl outline-none text-sm font-bold text-gray-800"
+                      className="w-full p-3 bg-gray-50 border border-gray-300 focus:border-blue-600 focus:bg-white rounded-xl outline-none text-sm font-bold text-gray-800 transition-all cursor-pointer shadow-2xs"
                       value={selectedExamForToken}
                       onChange={(e) => handleSelectExamForToken(e.target.value)}
                     >
-                      <option value="">-- Pilih Ujian --</option>
-                      {[...activeUnarchivedExams]
-                        .sort((a, b) => {
-                          const aReady = !a.adminLocked || a.isTokenReleased ? 1 : 0;
-                          const bReady = !b.adminLocked || b.isTokenReleased ? 1 : 0;
-                          return bReady - aReady;
-                        })
-                        .map(e => {
-                          const isAllowed = Boolean(!e.adminLocked || e.isTokenReleased);
-                          return (
-                            <option key={e.id} value={e.id}>
-                              {isAllowed ? '🟢 ' : '🔒 '}
-                              {e.title}
-                            </option>
-                          );
-                        })}
+                      {renderTokenExamSelectOptions(activeUnarchivedExams)}
                     </select>
                   </div>
 
