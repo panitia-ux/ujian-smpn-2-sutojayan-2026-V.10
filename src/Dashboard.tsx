@@ -15815,8 +15815,25 @@ export default function Dashboard() {
             classrooms={classrooms}
             masterPlan={masterPlan}
             onResetStudentToken={handleResetStudentToken}
-            onRefreshData={() => {
-              syncStudentExamAndViolationData(undefined, undefined, true);
+            onRefreshData={async () => {
+              try {
+                const [tokensSnap, violSnap] = await Promise.allSettled([
+                  withFirestoreTimeout(getDocs(query(collection(db, 'tokens'), orderBy('createdAt', 'desc'), limit(150))), 5000),
+                  withFirestoreTimeout(getDocs(query(collection(db, 'violations'), limit(150))), 5000)
+                ]);
+                if (tokensSnap.status === 'fulfilled' && !tokensSnap.value.empty) {
+                  const fetchedTokens = tokensSnap.value.docs.map(d => ({ id: d.id, ...d.data() }));
+                  setTokens(prev => mergeTokenListsWithUsage(prev, fetchedTokens));
+                }
+                if (violSnap.status === 'fulfilled' && !violSnap.value.empty) {
+                  const fetchedViols = violSnap.value.docs.map(d => ({ id: d.id, ...d.data() }));
+                  setViolations(dedupeById(fetchedViols));
+                }
+                handlePullExamStatusFromServer();
+                showToast('Status live monitoring berhasil disegarkan.', 'success');
+              } catch (e) {
+                console.warn("Monitoring refresh note:", e);
+              }
             }}
             isSuperAdmin={isSuperAdmin}
           />
