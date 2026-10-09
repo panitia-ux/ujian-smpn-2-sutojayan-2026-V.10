@@ -20,7 +20,17 @@ import {
   Calendar,
   Layers,
   ArrowUpRight,
-  Key
+  Key,
+  History,
+  ArrowUpDown,
+  FileText,
+  Printer,
+  Copy,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  Award
 } from 'lucide-react';
 import { normalizeRoomName } from '../lib/classConstants';
 import {
@@ -73,16 +83,57 @@ export interface SupervisorMonitoringRecord {
     id: string;
     code: string;
     examTitle: string;
+    createdAt?: any;
+    releasedAt?: any;
     expiresAt?: number | string;
+    creatorRuang?: string;
+    creatorName?: string;
+    creatorEmail?: string;
     studentCount: number;
     workingCount: number;
     finishedCount: number;
     violationCount: number;
+    students: StudentMonitoringRecord[];
   }[];
   totalStudents: number;
   workingStudents: number;
   finishedStudents: number;
   violationStudents: number;
+}
+
+export interface SupervisorHistoryGroup {
+  supervisorKey: string;
+  uid: string;
+  name: string;
+  email: string;
+  nip?: string;
+  ruang: string;
+  status: 'active' | 'standby' | 'offline';
+  hasReleasedToken: boolean;
+  tokens: {
+    id: string;
+    code: string;
+    examId?: string;
+    examTitle: string;
+    creatorName: string;
+    creatorEmail: string;
+    creatorRuang: string;
+    createdBy: string;
+    createdAt?: any;
+    expiresAt?: any;
+    isActive: boolean;
+    isExpired: boolean;
+    participants: StudentMonitoringRecord[];
+    studentCount: number;
+    workingCount: number;
+    finishedCount: number;
+    violationCount: number;
+  }[];
+  totalTokensCount: number;
+  totalParticipantsCount: number;
+  totalWorkingCount: number;
+  totalFinishedCount: number;
+  totalViolationCount: number;
 }
 
 interface LiveMonitoringDashboardProps {
@@ -168,7 +219,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
     return normalizeRoomName(raw) || 'Ruang 01';
   }, [effectiveSupervisorRuang, userProfile?.ruang, currentUser]);
 
-  const [activeAdminSubTab, setActiveAdminSubTab] = useState<'supervisors' | 'students'>('supervisors');
+  const [activeAdminSubTab, setActiveAdminSubTab] = useState<'supervisors' | 'students' | 'history'>('supervisors');
   const [supervisorFilter, setSupervisorFilter] = useState<'ALL' | 'RELEASED' | 'PENDING' | 'ONLINE'>('ALL');
   const [selectedRoomFilter, setSelectedRoomFilter] = useState<string>('ALL');
   const [selectedTokenFilter, setSelectedTokenFilter] = useState<string>('ALL');
@@ -178,6 +229,21 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date>(new Date());
   const [resettingUid, setResettingUid] = useState<string | null>(null);
   const [focusedStudent, setFocusedStudent] = useState<StudentMonitoringRecord | null>(null);
+
+  // Opsi Pengurutan Fleksibel (Sesuai Nama, Sesuai Yang Dipilih, Penggabungan)
+  const [studentSortBy, setStudentSortBy] = useState<'status' | 'name_asc' | 'name_desc' | 'class_room' | 'started_desc' | 'combined'>('status');
+  const [supervisorSortBy, setSupervisorSortBy] = useState<'token_active' | 'name_asc' | 'name_desc' | 'room' | 'students_desc' | 'combined'>('token_active');
+
+  // Filter & Pengurutan untuk Tab Histori Token & Peserta Pengawas
+  const [historySupervisorFilter, setHistorySupervisorFilter] = useState<string>('ALL');
+  const [historyExamFilter, setHistoryExamFilter] = useState<string>('ALL');
+  const [historyRoomFilter, setHistoryRoomFilter] = useState<string>('ALL');
+  const [historySearchQuery, setHistorySearchQuery] = useState<string>('');
+  const [historySortBy, setHistorySortBy] = useState<'latest_token' | 'oldest_token' | 'sup_name_asc' | 'sup_name_desc' | 'most_students' | 'combined'>('latest_token');
+  const [historyViewMode, setHistoryViewMode] = useState<'grouped' | 'flat'>('grouped');
+  const [selectedSupervisorModal, setSelectedSupervisorModal] = useState<SupervisorMonitoringRecord | null>(null);
+  const [copiedTokenCode, setCopiedTokenCode] = useState<string | null>(null);
+  const [expandedHistoryTokens, setExpandedHistoryTokens] = useState<Set<string>>(new Set());
 
   // Interval realtime auto-refresh timer display (per detik)
   const [nowMs, setNowMs] = useState<number>(Date.now());
@@ -212,6 +278,76 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       return d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
     } catch {
       return '-';
+    }
+  };
+
+  const formatDateTimeId = (val: any): string => {
+    if (!val) return '-';
+    try {
+      let dateObj: Date;
+      if (typeof val?.toDate === 'function') dateObj = val.toDate();
+      else if (typeof val === 'number') dateObj = new Date(val > 100000000000 ? val : val * 1000);
+      else if (typeof val === 'string') dateObj = new Date(val);
+      else if (val?.seconds) dateObj = new Date(val.seconds * 1000);
+      else return '-';
+
+      if (isNaN(dateObj.getTime())) return '-';
+      return dateObj.toLocaleDateString('id-ID', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch {
+      return '-';
+    }
+  };
+
+  const handleCopyToken = (code: string) => {
+    if (!code) return;
+    try {
+      navigator.clipboard.writeText(code);
+      setCopiedTokenCode(code);
+      setTimeout(() => setCopiedTokenCode(null), 2500);
+    } catch (e) {
+      console.warn('Copy clipboard failed:', e);
+    }
+  };
+
+  // Safe iframe-based print utility (no window.open, no window.alert)
+  const handlePrintHtml = (title: string, htmlContent: string) => {
+    try {
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      document.body.appendChild(iframe);
+
+      const doc = iframe.contentWindow?.document;
+      if (!doc) return;
+      doc.open();
+      doc.write(htmlContent);
+      doc.close();
+
+      iframe.contentWindow?.focus();
+      setTimeout(() => {
+        try {
+          iframe.contentWindow?.print();
+        } catch (err) {
+          console.error('Print iframe error:', err);
+        }
+        setTimeout(() => {
+          try {
+            document.body.removeChild(iframe);
+          } catch (e) {}
+        }, 3000);
+      }, 400);
+    } catch (e) {
+      console.error('Print error:', e);
     }
   };
 
@@ -458,6 +594,56 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
     searchQuery,
   ]);
 
+  // Pengurutan Siswa Fleksibel (Sesuai Nama, Sesuai Yang Dipilih: Ruang & Kelas, Status, Waktu Mulai, Penggabungan)
+  const sortedVisibleStudentRecords = useMemo(() => {
+    const list = [...visibleStudentRecords];
+    return list.sort((a, b) => {
+      if (studentSortBy === 'name_asc') {
+        return a.name.localeCompare(b.name);
+      }
+      if (studentSortBy === 'name_desc') {
+        return b.name.localeCompare(a.name);
+      }
+      if (studentSortBy === 'class_room') {
+        const roomCmp = (a.ruang || '').localeCompare(b.ruang || '');
+        if (roomCmp !== 0) return roomCmp;
+        const classCmp = (a.kelas || '').localeCompare(b.kelas || '');
+        if (classCmp !== 0) return classCmp;
+        return a.name.localeCompare(b.name);
+      }
+      if (studentSortBy === 'started_desc') {
+        const aTime = a.startedAt ? new Date(a.startedAt).getTime() : 0;
+        const bTime = b.startedAt ? new Date(b.startedAt).getTime() : 0;
+        return bTime - aTime;
+      }
+      if (studentSortBy === 'combined') {
+        // Penggabungan: Status Urgensi -> Ruang -> Kelas -> Nama
+        const statusRank = (s: string) => {
+          if (s === 'violation') return 1;
+          if (s === 'working') return 2;
+          if (s === 'reset') return 3;
+          if (s === 'idle') return 4;
+          return 5;
+        };
+        const rDiff = statusRank(a.status) - statusRank(b.status);
+        if (rDiff !== 0) return rDiff;
+        const roomCmp = (a.ruang || '').localeCompare(b.ruang || '');
+        if (roomCmp !== 0) return roomCmp;
+        const classCmp = (a.kelas || '').localeCompare(b.kelas || '');
+        if (classCmp !== 0) return classCmp;
+        return a.name.localeCompare(b.name);
+      }
+      // Default: 'status' (Prioritaskan Pelanggaran -> Mengerjakan -> Reset -> Belum Masuk -> Selesai -> Nama)
+      if (a.status === 'violation' && b.status !== 'violation') return -1;
+      if (a.status !== 'violation' && b.status === 'violation') return 1;
+      if (a.status === 'working' && b.status !== 'working') return -1;
+      if (a.status !== 'working' && b.status === 'working') return 1;
+      if (a.status === 'idle' && b.status === 'finished') return -1;
+      if (a.status === 'finished' && b.status === 'idle') return 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [visibleStudentRecords, studentSortBy]);
+
   // 3. Ringkasan Pengawas untuk Admin
   const supervisorRecords = useMemo<SupervisorMonitoringRecord[]>(() => {
     // Kumpulkan seluruh user dengan role 'pengawas'
@@ -585,11 +771,17 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
             id: t.id,
             code: tCode,
             examTitle: t.examTitle || exams.find((e: any) => e.id === t.examId)?.title || 'Ujian',
+            createdAt: t.createdAt || t.releasedAt,
+            releasedAt: t.releasedAt || t.createdAt,
             expiresAt: t.expiresAt,
+            creatorRuang: t.creatorRuang || uRuang,
+            creatorName: t.creatorName || uName,
+            creatorEmail: t.creatorEmail || uEmail,
             studentCount: tStudents.length,
-            workingCount: tStudents.filter((s) => s.status === 'working').length,
+            workingCount: tStudents.filter((s) => s.status === 'working' || s.status === 'reset').length,
             finishedCount: tStudents.filter((s) => s.status === 'finished').length,
             violationCount: tStudents.filter((s) => s.status === 'violation').length,
+            students: tStudents,
           };
         }),
         totalStudents: myStudents.length,
@@ -636,9 +828,9 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
     };
   }, [visibleStudentRecords, supervisorRecords]);
 
-  // Pengawas yang difilter untuk tampilan Admin
+  // Pengawas yang difilter untuk tampilan Admin dengan Opsi Pengurutan
   const displayedSupervisors = useMemo(() => {
-    return supervisorRecords.filter((sup) => {
+    let result = supervisorRecords.filter((sup) => {
       if (supervisorFilter === 'RELEASED' && !sup.hasReleasedToken) return false;
       if (supervisorFilter === 'PENDING' && sup.hasReleasedToken) return false;
       if (supervisorFilter === 'ONLINE' && sup.status !== 'active') return false;
@@ -653,7 +845,472 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       }
       return true;
     });
-  }, [supervisorRecords, supervisorFilter, searchQuery]);
+
+    return result.sort((a, b) => {
+      if (supervisorSortBy === 'name_asc') {
+        return a.name.localeCompare(b.name);
+      }
+      if (supervisorSortBy === 'name_desc') {
+        return b.name.localeCompare(a.name);
+      }
+      if (supervisorSortBy === 'room') {
+        return a.ruang.localeCompare(b.ruang);
+      }
+      if (supervisorSortBy === 'students_desc') {
+        return b.totalStudents - a.totalStudents;
+      }
+      if (supervisorSortBy === 'combined') {
+        const roomCmp = a.ruang.localeCompare(b.ruang);
+        if (roomCmp !== 0) return roomCmp;
+        if (a.hasReleasedToken && !b.hasReleasedToken) return -1;
+        if (!a.hasReleasedToken && b.hasReleasedToken) return 1;
+        return a.name.localeCompare(b.name);
+      }
+      // Default: 'token_active'
+      if (a.hasReleasedToken && !b.hasReleasedToken) return -1;
+      if (!a.hasReleasedToken && b.hasReleasedToken) return 1;
+      if (a.status === 'active' && b.status !== 'active') return -1;
+      if (b.status === 'active' && a.status !== 'active') return 1;
+      if (a.status === 'standby' && b.status === 'offline') return -1;
+      if (a.status === 'offline' && b.status === 'standby') return 1;
+      return a.ruang.localeCompare(b.ruang);
+    });
+  }, [supervisorRecords, supervisorFilter, searchQuery, supervisorSortBy]);
+
+  // 4. Seluruh Histori Token dengan Rincian Siswa Peserta Ujian
+  const allTokensWithParticipants = useMemo(() => {
+    return tokens.map((t: any) => {
+      const tCode = String(t.code || '').toUpperCase().trim();
+      const examId = String(t.examId || '');
+      const examTitle = String(
+        t.examTitle || exams.find((e: any) => e.id === examId)?.title || 'Ujian Sekolah'
+      );
+      const creatorName = String(t.creatorName || 'Pengawas');
+      const creatorEmail = String(t.creatorEmail || '').toLowerCase().trim();
+      const creatorRuang = String(t.creatorRuang || '-');
+      const createdBy = String(t.createdBy || '');
+      const createdAt = t.createdAt || t.releasedAt;
+      const expiresAt = t.expiresAt;
+      const expMs = parseTimestampMs(expiresAt) || (parseTimestampMs(createdAt) ? parseTimestampMs(createdAt) + 4 * 3600 * 1000 : 0);
+      const isExpired = expMs > 0 ? expMs < nowMs : false;
+      const isActive = !isExpired;
+
+      // Kumpulkan siswa yang memakai token ini
+      const participants = allStudentRecords.filter(
+        (s) => s.tokenCode && s.tokenCode.toUpperCase().trim() === tCode
+      );
+
+      const workingCount = participants.filter((s) => s.status === 'working' || s.status === 'reset').length;
+      const finishedCount = participants.filter((s) => s.status === 'finished').length;
+      const violationCount = participants.filter((s) => s.status === 'violation').length;
+
+      return {
+        id: String(t.id || tCode),
+        code: tCode,
+        examId,
+        examTitle,
+        creatorName,
+        creatorEmail,
+        creatorRuang,
+        createdBy,
+        createdAt,
+        expiresAt,
+        isActive,
+        isExpired,
+        participants,
+        studentCount: participants.length,
+        workingCount,
+        finishedCount,
+        violationCount,
+      };
+    });
+  }, [tokens, exams, allStudentRecords, nowMs]);
+
+  // 5. Histori Pengelompokan Token & Peserta per Pengawas
+  const supervisorTokenHistoryList = useMemo<SupervisorHistoryGroup[]>(() => {
+    // 1. Dari daftar supervisorRecords
+    const groups: SupervisorHistoryGroup[] = supervisorRecords.map((sup) => {
+      const normSupName = normalizeSupervisorName(sup.name);
+      const supTokens = allTokensWithParticipants.filter((t) => {
+        const matchUid = t.createdBy && (t.createdBy === sup.uid || t.createdBy === (sup as any).id);
+        const matchEmail = sup.email && t.creatorEmail && normalizeSupervisorEmail(t.creatorEmail) === sup.email;
+        const normTokName = normalizeSupervisorName(t.creatorName);
+        const matchName = normSupName && normTokName && (
+          normTokName === normSupName ||
+          normTokName.includes(normSupName) ||
+          normSupName.includes(normTokName)
+        );
+        const matchRuang = sup.ruang !== '-' && t.creatorRuang && normalizeRoomName(t.creatorRuang) === normalizeRoomName(sup.ruang);
+        return Boolean(matchUid || matchEmail || matchName || matchRuang);
+      });
+
+      // Total peserta unik dari pengawas ini
+      const uniqueStudents = new Set<string>();
+      supTokens.forEach((t) => t.participants.forEach((p) => uniqueStudents.add(p.uid)));
+
+      return {
+        supervisorKey: sup.uid || sup.email || sup.name,
+        uid: sup.uid,
+        name: sup.name,
+        email: sup.email || '',
+        nip: sup.nip,
+        ruang: sup.ruang,
+        status: sup.status,
+        hasReleasedToken: supTokens.length > 0,
+        tokens: supTokens,
+        totalTokensCount: supTokens.length,
+        totalParticipantsCount: uniqueStudents.size,
+        totalWorkingCount: supTokens.reduce((acc, t) => acc + t.workingCount, 0),
+        totalFinishedCount: supTokens.reduce((acc, t) => acc + t.finishedCount, 0),
+        totalViolationCount: supTokens.reduce((acc, t) => acc + t.violationCount, 0),
+      };
+    });
+
+    // 2. Token yang dibuat Admin atau nama lain yang belum masuk
+    const coveredCodes = new Set<string>();
+    groups.forEach((g) => g.tokens.forEach((t) => coveredCodes.add(t.code)));
+
+    const orphanTokens = allTokensWithParticipants.filter((t) => !coveredCodes.has(t.code));
+    if (orphanTokens.length > 0) {
+      const orphanMap = new Map<string, typeof orphanTokens>();
+      orphanTokens.forEach((ot) => {
+        const creatorKey = ot.creatorName || ot.creatorEmail || 'Admin / Panitia Ujian';
+        if (!orphanMap.has(creatorKey)) orphanMap.set(creatorKey, []);
+        orphanMap.get(creatorKey)!.push(ot);
+      });
+
+      orphanMap.forEach((toks, creatorKey) => {
+        const uniqueStudents = new Set<string>();
+        toks.forEach((t) => t.participants.forEach((p) => uniqueStudents.add(p.uid)));
+
+        groups.push({
+          supervisorKey: `custom_${creatorKey}`,
+          uid: toks[0]?.createdBy || `custom_${creatorKey}`,
+          name: creatorKey,
+          email: toks[0]?.creatorEmail || '',
+          nip: undefined,
+          ruang: toks[0]?.creatorRuang || 'Semua Ruang',
+          status: 'active',
+          hasReleasedToken: true,
+          tokens: toks,
+          totalTokensCount: toks.length,
+          totalParticipantsCount: uniqueStudents.size,
+          totalWorkingCount: toks.reduce((acc, t) => acc + t.workingCount, 0),
+          totalFinishedCount: toks.reduce((acc, t) => acc + t.finishedCount, 0),
+          totalViolationCount: toks.reduce((acc, t) => acc + t.violationCount, 0),
+        });
+      });
+    }
+
+    return groups;
+  }, [supervisorRecords, allTokensWithParticipants]);
+
+  // Histori per Pengawas yang Difilter & Diurutkan
+  const filteredSupervisorHistoryList = useMemo(() => {
+    let list = supervisorTokenHistoryList.filter((group) => {
+      // Filter Pengawas
+      if (historySupervisorFilter !== 'ALL') {
+        const matchKey = group.supervisorKey === historySupervisorFilter;
+        const matchEmail = group.email && group.email === historySupervisorFilter;
+        const matchName = group.name && group.name.toLowerCase().trim() === historySupervisorFilter.toLowerCase().trim();
+        if (!matchKey && !matchEmail && !matchName) return false;
+      }
+
+      // Filter Ruangan
+      if (historyRoomFilter !== 'ALL') {
+        if (normalizeRoomName(group.ruang) !== normalizeRoomName(historyRoomFilter)) return false;
+      }
+
+      // Filter Ujian
+      if (historyExamFilter !== 'ALL') {
+        const hasExam = group.tokens.some((t) => t.examId === historyExamFilter || t.examTitle === historyExamFilter);
+        if (!hasExam) return false;
+      }
+
+      // Search Query
+      if (historySearchQuery.trim()) {
+        const q = historySearchQuery.toLowerCase().trim();
+        const matchName = group.name.toLowerCase().includes(q);
+        const matchEmail = (group.email || '').toLowerCase().includes(q);
+        const matchNip = (group.nip || '').toLowerCase().includes(q);
+        const matchRuang = group.ruang.toLowerCase().includes(q);
+        const matchToken = group.tokens.some(
+          (t) =>
+            t.code.toLowerCase().includes(q) ||
+            t.examTitle.toLowerCase().includes(q) ||
+            t.participants.some(
+              (p) => p.name.toLowerCase().includes(q) || (p.nis && p.nis.toLowerCase().includes(q))
+            )
+        );
+        return matchName || matchEmail || matchNip || matchRuang || matchToken;
+      }
+
+      return true;
+    });
+
+    // Urutkan groups
+    return list.sort((a, b) => {
+      if (historySortBy === 'sup_name_asc') {
+        return a.name.localeCompare(b.name);
+      }
+      if (historySortBy === 'sup_name_desc') {
+        return b.name.localeCompare(a.name);
+      }
+      if (historySortBy === 'most_students') {
+        return b.totalParticipantsCount - a.totalParticipantsCount;
+      }
+      if (historySortBy === 'oldest_token') {
+        const aOldest = a.tokens.length > 0 ? Math.min(...a.tokens.map((t) => parseTimestampMs(t.createdAt) || 0)) : 0;
+        const bOldest = b.tokens.length > 0 ? Math.min(...b.tokens.map((t) => parseTimestampMs(t.createdAt) || 0)) : 0;
+        return aOldest - bOldest;
+      }
+      if (historySortBy === 'combined') {
+        // Penggabungan: Sudah Rilis Token -> Total Peserta Terbanyak -> Nama A-Z
+        if (a.hasReleasedToken && !b.hasReleasedToken) return -1;
+        if (!a.hasReleasedToken && b.hasReleasedToken) return 1;
+        const pDiff = b.totalParticipantsCount - a.totalParticipantsCount;
+        if (pDiff !== 0) return pDiff;
+        return a.name.localeCompare(b.name);
+      }
+      // Default: 'latest_token' (Waktu Rilis Terbaru)
+      const aLatest = a.tokens.length > 0 ? Math.max(...a.tokens.map((t) => parseTimestampMs(t.createdAt) || 0)) : 0;
+      const bLatest = b.tokens.length > 0 ? Math.max(...b.tokens.map((t) => parseTimestampMs(t.createdAt) || 0)) : 0;
+      if (aLatest !== bLatest) return bLatest - aLatest;
+      return a.name.localeCompare(b.name);
+    });
+  }, [supervisorTokenHistoryList, historySupervisorFilter, historyRoomFilter, historyExamFilter, historySearchQuery, historySortBy]);
+
+  // Histori Daftar Seluruh Token (Flat List)
+  const filteredFlatTokenHistoryList = useMemo(() => {
+    let list = allTokensWithParticipants.filter((t) => {
+      if (historySupervisorFilter !== 'ALL') {
+        const matchCreator =
+          t.creatorName.toLowerCase().trim() === historySupervisorFilter.toLowerCase().trim() ||
+          t.creatorEmail.toLowerCase().trim() === historySupervisorFilter.toLowerCase().trim();
+        if (!matchCreator) return false;
+      }
+      if (historyRoomFilter !== 'ALL') {
+        if (normalizeRoomName(t.creatorRuang) !== normalizeRoomName(historyRoomFilter)) return false;
+      }
+      if (historyExamFilter !== 'ALL') {
+        if (t.examId !== historyExamFilter && t.examTitle !== historyExamFilter) return false;
+      }
+      if (historySearchQuery.trim()) {
+        const q = historySearchQuery.toLowerCase().trim();
+        const matchToken = t.code.toLowerCase().includes(q);
+        const matchExam = t.examTitle.toLowerCase().includes(q);
+        const matchCreator = t.creatorName.toLowerCase().includes(q);
+        const matchRuang = t.creatorRuang.toLowerCase().includes(q);
+        const matchStudent = t.participants.some(
+          (p) => p.name.toLowerCase().includes(q) || (p.nis && p.nis.toLowerCase().includes(q))
+        );
+        return matchToken || matchExam || matchCreator || matchRuang || matchStudent;
+      }
+      return true;
+    });
+
+    return list.sort((a, b) => {
+      if (historySortBy === 'sup_name_asc') {
+        return a.creatorName.localeCompare(b.creatorName);
+      }
+      if (historySortBy === 'sup_name_desc') {
+        return b.creatorName.localeCompare(a.creatorName);
+      }
+      if (historySortBy === 'most_students') {
+        return b.studentCount - a.studentCount;
+      }
+      if (historySortBy === 'oldest_token') {
+        return (parseTimestampMs(a.createdAt) || 0) - (parseTimestampMs(b.createdAt) || 0);
+      }
+      if (historySortBy === 'combined') {
+        const cCmp = a.creatorName.localeCompare(b.creatorName);
+        if (cCmp !== 0) return cCmp;
+        return (parseTimestampMs(b.createdAt) || 0) - (parseTimestampMs(a.createdAt) || 0);
+      }
+      // Default: 'latest_token'
+      return (parseTimestampMs(b.createdAt) || 0) - (parseTimestampMs(a.createdAt) || 0);
+    });
+  }, [allTokensWithParticipants, historySupervisorFilter, historyRoomFilter, historyExamFilter, historySearchQuery, historySortBy]);
+
+  // Handler Cetak Laporan Resmi Histori Token Pengawas & Peserta
+  const handlePrintSupervisorHistoryReport = (group?: SupervisorHistoryGroup) => {
+    const todayStr = new Date().toLocaleDateString('id-ID', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric'
+    });
+    const printTimeStr = new Date().toLocaleTimeString('id-ID');
+
+    const targetGroups = group ? [group] : filteredSupervisorHistoryList.filter((g) => g.tokens.length > 0);
+    const totalTokens = targetGroups.reduce((acc, g) => acc + g.tokens.length, 0);
+    const totalStudents = targetGroups.reduce((acc, g) => acc + g.totalParticipantsCount, 0);
+
+    let rowsHtml = '';
+    let globalNo = 1;
+
+    targetGroups.forEach((g) => {
+      rowsHtml += `
+        <tr style="background-color: #f1f5f9; font-weight: bold;">
+          <td colspan="10" style="padding: 10px 8px; border: 1px solid #cbd5e1; font-size: 12px; color: #0f172a;">
+            PENGAWAS: ${g.name} ${g.nip ? `(NIP: ${g.nip})` : ''} &bull; RUANG: ${g.ruang} &bull; TOTAL TOKEN: ${g.tokens.length} &bull; TOTAL SISWA: ${g.totalParticipantsCount}
+          </td>
+        </tr>
+      `;
+
+      if (g.tokens.length === 0) {
+        rowsHtml += `
+          <tr>
+            <td colspan="10" style="padding: 8px; text-align: center; color: #94a3b8; font-style: italic; border: 1px solid #cbd5e1;">
+              Belum ada token yang dirilis oleh pengawas ini.
+            </td>
+          </tr>
+        `;
+      } else {
+        g.tokens.forEach((tok) => {
+          if (tok.participants.length === 0) {
+            rowsHtml += `
+              <tr>
+                <td style="padding: 6px 8px; border: 1px solid #cbd5e1; text-align: center;">${globalNo++}</td>
+                <td style="padding: 6px 8px; border: 1px solid #cbd5e1; font-family: monospace; font-weight: bold; color: #1e40af;">#${tok.code}</td>
+                <td style="padding: 6px 8px; border: 1px solid #cbd5e1;">${tok.examTitle}</td>
+                <td style="padding: 6px 8px; border: 1px solid #cbd5e1; font-size: 11px;">${formatDateTimeId(tok.createdAt)}</td>
+                <td colspan="6" style="padding: 6px 8px; border: 1px solid #cbd5e1; color: #94a3b8; font-style: italic;">
+                  Belum ada siswa yang menggunakan token ini.
+                </td>
+              </tr>
+            `;
+          } else {
+            tok.participants.forEach((p) => {
+              const statusBadgeColor =
+                p.status === 'finished' ? '#166534' :
+                p.status === 'working' ? '#1e40af' :
+                p.status === 'violation' ? '#991b1b' : '#854d0e';
+              const statusLabel =
+                p.status === 'finished' ? 'Selesai' :
+                p.status === 'working' ? 'Mengerjakan' :
+                p.status === 'violation' ? 'Terkunci' : 'Reset / Menunggu';
+
+              rowsHtml += `
+                <tr>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1; text-align: center;">${globalNo++}</td>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1; font-family: monospace; font-weight: bold; color: #1e40af;">#${tok.code}</td>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1;">${tok.examTitle}</td>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1; font-size: 11px;">${formatClock(p.startedAt)}</td>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1; font-weight: 600;">${p.name}</td>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1; text-align: center;">${p.nis || '-'}</td>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1; text-align: center;">${p.kelas || '-'}</td>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1; text-align: center;">${p.ruang || '-'}</td>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1; text-align: center; font-weight: bold; color: ${statusBadgeColor};">${statusLabel}</td>
+                  <td style="padding: 6px 8px; border: 1px solid #cbd5e1; font-size: 11px; color: ${p.violationCount ? '#b91c1c' : '#64748b'};">${p.latestViolationType || (p.violationCount ? 'Tercatat Pelanggaran' : 'Tertib')}</td>
+                </tr>
+              `;
+            });
+          }
+        });
+      }
+    });
+
+    const fullHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>Rekapitulasi Histori Token & Peserta Pengawas</title>
+        <style>
+          @page { size: A4 landscape; margin: 12mm; }
+          body { font-family: 'Times New Roman', Times, serif; color: #000; margin: 0; padding: 10px; font-size: 12px; }
+          .kop-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+          .kop-table td { padding: 0; vertical-align: middle; }
+          .kop-header { text-align: center; }
+          .kop-header h3 { margin: 0; font-size: 14px; font-weight: normal; text-transform: uppercase; }
+          .kop-header h2 { margin: 2px 0; font-size: 16px; font-weight: bold; text-transform: uppercase; }
+          .kop-header h1 { margin: 2px 0; font-size: 18px; font-weight: 900; text-transform: uppercase; }
+          .kop-header p { margin: 0; font-size: 11px; }
+          .divider { border-top: 3px double #000; margin-top: 6px; margin-bottom: 12px; }
+          .title { text-align: center; font-size: 14px; font-weight: bold; text-transform: uppercase; margin-bottom: 4px; text-decoration: underline; }
+          .sub-title { text-align: center; font-size: 11px; margin-bottom: 14px; }
+          .meta-table { width: 100%; margin-bottom: 12px; font-size: 11px; }
+          .meta-table td { padding: 2px 4px; }
+          .data-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 11px; }
+          .data-table th { background-color: #e2e8f0; border: 1px solid #64748b; padding: 6px 4px; text-align: center; font-weight: bold; font-size: 11px; }
+          .sign-area { width: 100%; margin-top: 25px; page-break-inside: avoid; }
+          .sign-area td { width: 50%; text-align: center; vertical-align: top; font-size: 12px; }
+        </style>
+      </head>
+      <body>
+        <table class="kop-table">
+          <tr>
+            <td class="kop-header">
+              <h3>PEMERINTAH KABUPATEN TEGAL</h3>
+              <h2>DINAS PENDIDIKAN DAN KEBUDAYAAN</h2>
+              <h1>SMP NEGERI 2 BOJONG</h1>
+              <p>Jl. Raya Tuwel - Bojong, Kec. Bojong, Kab. Tegal, Jawa Tengah 52465 &bull; Surel: smpn2bojong@gmail.com</p>
+            </td>
+          </tr>
+        </table>
+        <div class="divider"></div>
+
+        <div class="title">REKAPITULASI HISTORI TOKEN DAN PESERTA UJIAN PENGAWAS</div>
+        <div class="sub-title">Tahun Pelajaran 2026/2027 &bull; Dicetak: ${todayStr}, ${printTimeStr} WIB</div>
+
+        <table class="meta-table">
+          <tr>
+            <td style="width: 18%;"><b>Total Pengawas Terdata</b></td>
+            <td style="width: 32%;">: ${targetGroups.length} Pengawas</td>
+            <td style="width: 18%;"><b>Total Token Dikeluarkan</b></td>
+            <td style="width: 32%;">: ${totalTokens} Token</td>
+          </tr>
+          <tr>
+            <td><b>Total Peserta Ujian</b></td>
+            <td>: ${totalStudents} Siswa Terdaftar</td>
+            <td><b>Cakupan Laporan</b></td>
+            <td>: ${group ? `Khusus Pengawas: ${group.name}` : 'Semua Pengawas Terpilih'}</td>
+          </tr>
+        </table>
+
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width: 4%;">No</th>
+              <th style="width: 9%;">Token</th>
+              <th style="width: 17%;">Mata Pelajaran</th>
+              <th style="width: 7%;">Mulai</th>
+              <th style="width: 20%;">Nama Siswa</th>
+              <th style="width: 8%;">NIS</th>
+              <th style="width: 7%;">Kelas</th>
+              <th style="width: 8%;">Ruang</th>
+              <th style="width: 9%;">Status</th>
+              <th style="width: 11%;">Keterangan</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml || '<tr><td colspan="10" style="text-align:center; padding:12px;">Tidak ada data token dan peserta yang cocok.</td></tr>'}
+          </tbody>
+        </table>
+
+        <table class="sign-area">
+          <tr>
+            <td>
+              Mengetahui,<br />
+              Kepala SMP Negeri 2 Bojong<br /><br /><br /><br /><br />
+              <b><u>Drs. H. Mulyadi, M.Pd.</u></b><br />
+              NIP. 19680512 199412 1 002
+            </td>
+            <td>
+              Bojong, ${todayStr}<br />
+              Koordinator Proktor / Administrator<br /><br /><br /><br /><br />
+              <b><u>Panitia Pelaksana Asesmen</u></b><br />
+              NIP. -
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+
+    handlePrintHtml('Rekapitulasi Histori Token Pengawas', fullHtml);
+  };
 
   // List Ruangan unik untuk filter
   const availableRooms = useMemo(() => {
@@ -771,7 +1428,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
 
         {/* Admin Navigation Sub-Tabs */}
         {isAdmin && (
-          <div className="mt-6 pt-4 border-t border-white/10 flex items-center gap-2">
+          <div className="mt-6 pt-4 border-t border-white/10 flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setActiveAdminSubTab('supervisors')}
@@ -795,6 +1452,18 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
             >
               <Radio size={16} />
               <span>Monitoring Kotak Siswa ({stats.totalStudents})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveAdminSubTab('history')}
+              className={`px-4 py-2 rounded-xl text-xs font-extrabold transition-all flex items-center gap-2 cursor-pointer ${
+                activeAdminSubTab === 'history'
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/50 ring-2 ring-emerald-400'
+                  : 'bg-white/5 text-emerald-200 hover:bg-white/10'
+              }`}
+            >
+              <History size={16} />
+              <span>Histori Token &amp; Peserta Pengawas ({allTokensWithParticipants.length} Token)</span>
             </button>
           </div>
         )}
@@ -1088,6 +1757,25 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                     ))}
                 </select>
               </div>
+              {/* Selector Cepat Urutan Pengawas */}
+              <div className="flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-xl border border-blue-200 shadow-2xs">
+                <span className="text-[11px] font-black text-gray-600 uppercase flex items-center gap-1">
+                  <ArrowUpDown size={12} className="text-blue-600" />
+                  <span>Urutkan:</span>
+                </span>
+                <select
+                  value={supervisorSortBy}
+                  onChange={(e) => setSupervisorSortBy(e.target.value as any)}
+                  className="bg-transparent text-gray-800 text-xs font-bold outline-none cursor-pointer"
+                >
+                  <option value="token_active">Rilis Token &amp; Keaktifan (Default)</option>
+                  <option value="name_asc">Nama Pengawas (A &rarr; Z)</option>
+                  <option value="name_desc">Nama Pengawas (Z &rarr; A)</option>
+                  <option value="room">Sesuai Ruang Tugas</option>
+                  <option value="students_desc">Jumlah Siswa Terbanyak</option>
+                  <option value="combined">Penggabungan (Ruang + Status + Nama)</option>
+                </select>
+              </div>
             </div>
 
             <div className="w-full sm:w-64">
@@ -1248,27 +1936,40 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                     )}
                   </div>
 
-                  {/* Tombol Lihat Siswa Ruangan */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (sup.ruang && sup.ruang !== '-') {
-                        setSelectedRoomFilter(sup.ruang);
-                      }
-                      if (sup.activeTokens.length > 0 && sup.activeTokens[0]?.code) {
-                        setSelectedTokenFilter(sup.activeTokens[0].code);
-                      }
-                      setActiveAdminSubTab('students');
-                    }}
-                    className={`w-full py-2.5 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer ${
-                      sup.hasReleasedToken
-                        ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                        : 'bg-gray-900 hover:bg-black text-white'
-                    }`}
-                  >
-                    <span>{sup.hasReleasedToken ? 'Pantau Siswa Pemakai Token Ini' : 'Pantau Kotak Siswa di Ruang Ini'}</span>
-                    <ArrowUpRight size={14} />
-                  </button>
+                  {/* Tombol Aksi: Histori Token & Peserta + Kotak Siswa */}
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedSupervisorModal(sup);
+                      }}
+                      className="py-2.5 px-2 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-2xs border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 cursor-pointer"
+                      title="Lihat histori semua token yang dikeluarkan pengawas ini dan siapa saja siswa yang ikut ujian"
+                    >
+                      <History size={14} className="shrink-0" />
+                      <span className="truncate">Histori ({sup.activeTokens.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (sup.ruang && sup.ruang !== '-') {
+                          setSelectedRoomFilter(sup.ruang);
+                        }
+                        if (sup.activeTokens.length > 0 && sup.activeTokens[0]?.code) {
+                          setSelectedTokenFilter(sup.activeTokens[0].code);
+                        }
+                        setActiveAdminSubTab('students');
+                      }}
+                      className={`py-2.5 px-2 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer ${
+                        sup.hasReleasedToken
+                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                          : 'bg-gray-900 hover:bg-black text-white'
+                      }`}
+                    >
+                      <span className="truncate">Kotak Siswa</span>
+                      <ArrowUpRight size={14} className="shrink-0" />
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -1422,6 +2123,26 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                 </select>
               )}
 
+              {/* Opsi Pengurutan Siswa */}
+              <div className="flex items-center gap-1.5 ml-auto bg-white px-2.5 py-1 rounded-xl border border-blue-200 shadow-2xs">
+                <span className="text-[11px] font-black text-gray-600 uppercase flex items-center gap-1">
+                  <ArrowUpDown size={12} className="text-blue-600" />
+                  <span>Urutkan:</span>
+                </span>
+                <select
+                  value={studentSortBy}
+                  onChange={(e) => setStudentSortBy(e.target.value as any)}
+                  className="bg-transparent text-gray-800 text-xs font-bold outline-none cursor-pointer"
+                >
+                  <option value="status">Status &amp; Urgensi (Default)</option>
+                  <option value="name_asc">Nama Siswa (A &rarr; Z)</option>
+                  <option value="name_desc">Nama Siswa (Z &rarr; A)</option>
+                  <option value="class_room">Sesuai Pilihan: Ruang &amp; Kelas</option>
+                  <option value="started_desc">Waktu Mulai Terbaru</option>
+                  <option value="combined">Penggabungan (Status + Ruang + Nama)</option>
+                </select>
+              </div>
+
               {(selectedRoomFilter !== 'ALL' || selectedClassFilter !== 'ALL' || selectedTokenFilter !== 'ALL' || searchQuery) && (
                 <button
                   type="button"
@@ -1432,7 +2153,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                     setSearchQuery('');
                     setStatusFilter('ALL');
                   }}
-                  className="text-blue-600 hover:text-blue-800 text-[11px] font-bold underline ml-auto cursor-pointer"
+                  className="text-blue-600 hover:text-blue-800 text-[11px] font-bold underline cursor-pointer"
                 >
                   Reset Filter
                 </button>
@@ -1472,9 +2193,9 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
           </div>
 
           {/* Grid Kotak-Kotak Siswa */}
-          {visibleStudentRecords.length > 0 ? (
+          {sortedVisibleStudentRecords.length > 0 ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-              {visibleStudentRecords.map((student) => {
+              {sortedVisibleStudentRecords.map((student) => {
                 const isWorking = student.status === 'working' || student.status === 'reset';
                 const isFinished = student.status === 'finished';
                 const isViolation = student.status === 'violation';
@@ -1642,6 +2363,648 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
         </div>
       )}
 
+      {/* ============================================================== */}
+      {/* TAMPILAN 3: HISTORI TOKEN & PESERTA PENGAWAS (KHUSUS ADMIN)    */}
+      {/* ============================================================== */}
+      {isAdmin && activeAdminSubTab === 'history' && (
+        <div className="space-y-5">
+          {/* Header Banner & Stats */}
+          <div className="bg-white p-5 rounded-3xl border border-gray-200/80 shadow-sm space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-black text-gray-900 flex items-center gap-2.5">
+                  <History className="text-emerald-600" size={22} />
+                  <span>Histori Seluruh Token &amp; Peserta Ujian per Pengawas</span>
+                </h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Rekapitulasi lengkap riwayat token yang dikeluarkan masing-masing pengawas, waktu rilis, serta siapa saja siswa yang mengikuti ujian.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => handlePrintSupervisorHistoryReport()}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-sm shadow-emerald-900/20 cursor-pointer"
+                  title="Cetak seluruh rekapitulasi histori token dan peserta pengawas ke printer/PDF"
+                >
+                  <Printer size={15} />
+                  <span>Cetak Laporan Rekap</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Stat Bar */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-gray-100">
+              <div className="bg-gray-50 p-3 rounded-2xl border border-gray-100">
+                <p className="text-[10px] font-bold text-gray-500 uppercase">Total Token Dikeluarkan</p>
+                <p className="text-xl font-black text-gray-900">{allTokensWithParticipants.length} <span className="text-xs font-normal text-gray-500">Token</span></p>
+              </div>
+              <div className="bg-indigo-50/60 p-3 rounded-2xl border border-indigo-100">
+                <p className="text-[10px] font-bold text-indigo-700 uppercase">Total Peserta Terdata</p>
+                <p className="text-xl font-black text-indigo-700">
+                  {filteredSupervisorHistoryList.reduce((acc, g) => acc + g.totalParticipantsCount, 0)} <span className="text-xs font-normal text-indigo-600/80">Siswa</span>
+                </p>
+              </div>
+              <div className="bg-emerald-50/60 p-3 rounded-2xl border border-emerald-100">
+                <p className="text-[10px] font-bold text-emerald-700 uppercase">Selesai Mengerjakan</p>
+                <p className="text-xl font-black text-emerald-700">
+                  {filteredSupervisorHistoryList.reduce((acc, g) => acc + g.totalFinishedCount, 0)} <span className="text-xs font-normal text-emerald-600/80">Siswa</span>
+                </p>
+              </div>
+              <div className="bg-rose-50/60 p-3 rounded-2xl border border-rose-100">
+                <p className="text-[10px] font-bold text-rose-700 uppercase">Terkunci / Kendala</p>
+                <p className="text-xl font-black text-rose-700">
+                  {filteredSupervisorHistoryList.reduce((acc, g) => acc + g.totalViolationCount, 0)} <span className="text-xs font-normal text-rose-600/80">Siswa</span>
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Filter & Toolbar */}
+          <div className="bg-white p-4 rounded-3xl border border-gray-200/80 shadow-sm space-y-3">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+              {/* Search */}
+              <div className="relative flex-1">
+                <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  placeholder="Cari pengawas, kode token #..., nama siswa, NIS, atau ujian..."
+                  value={historySearchQuery}
+                  onChange={(e) => setHistorySearchQuery(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-900 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                />
+              </div>
+
+              {/* View Mode Toggle: Kelompok per Pengawas vs Daftar Semua Token */}
+              <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setHistoryViewMode('grouped')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    historyViewMode === 'grouped'
+                      ? 'bg-white text-gray-900 shadow-2xs'
+                      : 'text-gray-500 hover:text-gray-900'
+                  }`}
+                >
+                  <Users size={13} />
+                  <span>Kelompok per Pengawas ({filteredSupervisorHistoryList.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHistoryViewMode('flat')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    historyViewMode === 'flat'
+                      ? 'bg-white text-gray-900 shadow-2xs'
+                      : 'text-gray-500 hover:text-gray-900'
+                  }`}
+                >
+                  <Key size={13} />
+                  <span>Daftar Seluruh Token ({filteredFlatTokenHistoryList.length})</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Dropdown Filters */}
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-100 text-xs">
+              <span className="text-gray-400 font-bold uppercase text-[10px] flex items-center gap-1">
+                <Filter size={12} />
+                <span>Filter Histori:</span>
+              </span>
+
+              {/* Filter Pengawas */}
+              <select
+                value={historySupervisorFilter}
+                onChange={(e) => setHistorySupervisorFilter(e.target.value)}
+                className="px-2.5 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-gray-700 outline-none cursor-pointer max-w-[200px] truncate"
+              >
+                <option value="ALL">Semua Pengawas</option>
+                {supervisorTokenHistoryList.map((g) => (
+                  <option key={g.supervisorKey} value={g.supervisorKey}>
+                    {g.name} ({g.totalTokensCount} Token)
+                  </option>
+                ))}
+              </select>
+
+              {/* Filter Ujian */}
+              <select
+                value={historyExamFilter}
+                onChange={(e) => setHistoryExamFilter(e.target.value)}
+                className="px-2.5 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-gray-700 outline-none cursor-pointer max-w-[200px] truncate"
+              >
+                <option value="ALL">Semua Mata Pelajaran / Ujian</option>
+                {exams.map((ex: any) => (
+                  <option key={ex.id} value={ex.id}>
+                    {ex.title}
+                  </option>
+                ))}
+              </select>
+
+              {/* Filter Ruangan */}
+              {availableRooms.length > 0 && (
+                <select
+                  value={historyRoomFilter}
+                  onChange={(e) => setHistoryRoomFilter(e.target.value)}
+                  className="px-2.5 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-gray-700 outline-none cursor-pointer"
+                >
+                  <option value="ALL">Semua Ruangan</option>
+                  {availableRooms.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {/* Dropdown Urutkan Histori */}
+              <div className="flex items-center gap-1.5 ml-auto bg-emerald-50/60 px-2.5 py-1 rounded-xl border border-emerald-200 shadow-2xs">
+                <span className="text-[11px] font-black text-emerald-800 uppercase flex items-center gap-1">
+                  <ArrowUpDown size={12} className="text-emerald-700" />
+                  <span>Urutkan:</span>
+                </span>
+                <select
+                  value={historySortBy}
+                  onChange={(e) => setHistorySortBy(e.target.value as any)}
+                  className="bg-transparent text-emerald-950 text-xs font-bold outline-none cursor-pointer"
+                >
+                  <option value="latest_token">Waktu Rilis Token (Terbaru)</option>
+                  <option value="oldest_token">Waktu Rilis Token (Terlama)</option>
+                  <option value="sup_name_asc">Nama Pengawas (A &rarr; Z)</option>
+                  <option value="sup_name_desc">Nama Pengawas (Z &rarr; A)</option>
+                  <option value="most_students">Jumlah Siswa Terbanyak</option>
+                  <option value="combined">Penggabungan (Rilis + Siswa + Nama)</option>
+                </select>
+              </div>
+
+              {(historySupervisorFilter !== 'ALL' || historyExamFilter !== 'ALL' || historyRoomFilter !== 'ALL' || historySearchQuery) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHistorySupervisorFilter('ALL');
+                    setHistoryExamFilter('ALL');
+                    setHistoryRoomFilter('ALL');
+                    setHistorySearchQuery('');
+                  }}
+                  className="text-emerald-700 hover:text-emerald-900 text-[11px] font-bold underline cursor-pointer"
+                >
+                  Reset Filter
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* MODE 1: KELOMPOK PER PENGAWAS */}
+          {historyViewMode === 'grouped' && (
+            <div className="space-y-4">
+              {filteredSupervisorHistoryList.length > 0 ? (
+                filteredSupervisorHistoryList.map((supGroup) => {
+                  const hasTokens = supGroup.tokens.length > 0;
+                  return (
+                    <div
+                      key={supGroup.supervisorKey}
+                      className="bg-white rounded-3xl border border-gray-200/80 shadow-sm overflow-hidden transition-all hover:border-gray-300"
+                    >
+                      {/* Header Pengawas */}
+                      <div className="p-5 bg-gradient-to-r from-slate-50 via-white to-white border-b border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-11 h-11 rounded-2xl bg-indigo-50 text-indigo-700 flex items-center justify-center font-black text-base shrink-0 border border-indigo-100 shadow-2xs">
+                            {supGroup.name.charAt(0)}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h3 className="text-base font-extrabold text-gray-900 truncate">
+                                {supGroup.name}
+                              </h3>
+                              <span className="text-[11px] font-extrabold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-200">
+                                {supGroup.ruang !== '-' ? supGroup.ruang : 'Semua Ruang'}
+                              </span>
+                              {hasTokens ? (
+                                <span className="text-[11px] font-black text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-full border border-emerald-300 flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                  <span>{supGroup.tokens.length} Token Dirilis</span>
+                                </span>
+                              ) : (
+                                <span className="text-[11px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                                  Belum Rilis Token
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-gray-500 truncate mt-0.5">
+                              {supGroup.nip ? `NIP: ${supGroup.nip} • ` : ''}
+                              {supGroup.email || 'Pengawas Ruang'}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Statistik Mini & Aksi */}
+                        <div className="flex items-center gap-2 flex-wrap self-start md:self-center">
+                          <div className="flex items-center gap-2 bg-gray-50 px-3 py-1.5 rounded-xl border border-gray-200 text-xs">
+                            <span className="font-bold text-gray-600">Peserta:</span>
+                            <span className="font-black text-gray-900">{supGroup.totalParticipantsCount} Siswa</span>
+                            <span className="text-gray-300">|</span>
+                            <span className="font-bold text-emerald-700">{supGroup.totalFinishedCount} Selesai</span>
+                            {supGroup.totalViolationCount > 0 && (
+                              <>
+                                <span className="text-gray-300">|</span>
+                                <span className="font-bold text-rose-600">{supGroup.totalViolationCount} Terkunci</span>
+                              </>
+                            )}
+                          </div>
+
+                          {hasTokens && (
+                            <button
+                              type="button"
+                              onClick={() => handlePrintSupervisorHistoryReport(supGroup)}
+                              className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border border-gray-200"
+                              title={`Cetak rekapitulasi khusus untuk pengawas ${supGroup.name}`}
+                            >
+                              <Printer size={13} />
+                              <span>Cetak</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Isi: Daftar Token & Peserta per Token */}
+                      {hasTokens ? (
+                        <div className="p-5 space-y-4">
+                          {supGroup.tokens.map((tokenItem) => {
+                            const isExpanded = !expandedHistoryTokens.has(tokenItem.id);
+                            return (
+                              <div
+                                key={tokenItem.id || tokenItem.code}
+                                className="rounded-2xl border border-gray-200 overflow-hidden shadow-2xs"
+                              >
+                                {/* Header Bar Token */}
+                                <div className="p-3.5 bg-slate-50/80 flex flex-wrap items-center justify-between gap-3 border-b border-gray-200/80">
+                                  <div className="flex items-center gap-2.5 flex-wrap">
+                                    <div className="flex items-center gap-1.5 bg-white px-3 py-1 rounded-xl border border-blue-200 shadow-2xs font-mono font-black text-sm text-blue-800">
+                                      <Key size={14} className="text-blue-600" />
+                                      <span>#{tokenItem.code}</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCopyToken(tokenItem.code)}
+                                        className="ml-1 text-gray-400 hover:text-blue-700 p-0.5 rounded cursor-pointer"
+                                        title="Salin kode token"
+                                      >
+                                        {copiedTokenCode === tokenItem.code ? (
+                                          <Check size={13} className="text-emerald-600" />
+                                        ) : (
+                                          <Copy size={13} />
+                                        )}
+                                      </button>
+                                    </div>
+
+                                    <div>
+                                      <h4 className="text-xs font-bold text-gray-900">
+                                        {tokenItem.examTitle}
+                                      </h4>
+                                      <p className="text-[11px] text-gray-500">
+                                        Dikeluarkan: {formatDateTimeId(tokenItem.createdAt)} • Ruang: {tokenItem.creatorRuang}
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-2">
+                                    <span
+                                      className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
+                                        tokenItem.isActive
+                                          ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                          : 'bg-gray-100 text-gray-600 border-gray-200'
+                                      }`}
+                                    >
+                                      {tokenItem.isActive ? '🟢 AKTIF' : '⚪ SELESAI / EXPIRED'}
+                                    </span>
+
+                                    <span className="text-xs font-extrabold text-gray-700 bg-white px-2.5 py-1 rounded-xl border border-gray-200 shadow-2xs">
+                                      {tokenItem.studentCount} Siswa Ikut
+                                    </span>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setExpandedHistoryTokens((prev) => {
+                                          const next = new Set(prev);
+                                          if (next.has(tokenItem.id)) next.delete(tokenItem.id);
+                                          else next.add(tokenItem.id);
+                                          return next;
+                                        });
+                                      }}
+                                      className="p-1 text-gray-400 hover:text-gray-700 rounded-lg cursor-pointer transition-transform"
+                                      title={isExpanded ? 'Sembunyikan daftar peserta' : 'Buka daftar peserta'}
+                                    >
+                                      {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Tabel Rincian Siswa Peserta Ujian */}
+                                {isExpanded && (
+                                  <div className="overflow-x-auto">
+                                    {tokenItem.participants.length > 0 ? (
+                                      <table className="w-full text-left text-xs border-collapse">
+                                        <thead>
+                                          <tr className="bg-gray-50 text-gray-500 text-[10px] uppercase font-bold border-b border-gray-200">
+                                            <th className="py-2.5 px-3 w-10 text-center">No</th>
+                                            <th className="py-2.5 px-3">Nama Siswa &amp; NIS</th>
+                                            <th className="py-2.5 px-3 w-20 text-center">Kelas</th>
+                                            <th className="py-2.5 px-3 w-24 text-center">Ruang</th>
+                                            <th className="py-2.5 px-3 w-24">Waktu Mulai</th>
+                                            <th className="py-2.5 px-3 w-28">Waktu Selesai</th>
+                                            <th className="py-2.5 px-3 w-36 text-center">Status Ujian</th>
+                                            <th className="py-2.5 px-3">Catatan Pelanggaran</th>
+                                            <th className="py-2.5 px-3 w-28 text-center">Aksi</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-100">
+                                          {tokenItem.participants.map((stu, idx) => {
+                                            const isDone = stu.status === 'finished';
+                                            const isRunning = stu.status === 'working' || stu.status === 'reset';
+                                            const isLocked = stu.status === 'violation';
+
+                                            return (
+                                              <tr key={`${stu.uid}_${stu.tokenCode}`} className="hover:bg-slate-50/70 transition-colors">
+                                                <td className="py-2.5 px-3 text-center text-gray-400 font-mono text-[11px]">{idx + 1}</td>
+                                                <td className="py-2.5 px-3">
+                                                  <div className="font-extrabold text-gray-900">{stu.name}</div>
+                                                  <div className="text-[10px] text-gray-400">{stu.nis ? `NIS: ${stu.nis}` : stu.email || '-'}</div>
+                                                </td>
+                                                <td className="py-2.5 px-3 text-center">
+                                                  <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded text-[11px]">
+                                                    {stu.kelas || '-'}
+                                                  </span>
+                                                </td>
+                                                <td className="py-2.5 px-3 text-center text-gray-600 font-semibold">{stu.ruang || '-'}</td>
+                                                <td className="py-2.5 px-3 font-mono text-[11px] text-gray-600">
+                                                  {stu.startedAt ? formatClock(stu.startedAt) : '-'}
+                                                </td>
+                                                <td className="py-2.5 px-3 font-mono text-[11px] text-gray-600">
+                                                  {stu.finishedAt ? formatClock(stu.finishedAt) : isRunning ? 'Sedang Jalan' : '-'}
+                                                </td>
+                                                <td className="py-2.5 px-3 text-center">
+                                                  {isDone ? (
+                                                    <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full border border-emerald-200">
+                                                      <CheckCircle2 size={11} className="text-emerald-600" />
+                                                      <span>Selesai</span>
+                                                    </span>
+                                                  ) : isRunning ? (
+                                                    <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-blue-800 bg-blue-100 px-2 py-0.5 rounded-full border border-blue-200">
+                                                      <span className="w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse" />
+                                                      <span>Mengerjakan</span>
+                                                    </span>
+                                                  ) : isLocked ? (
+                                                    <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-rose-800 bg-rose-100 px-2 py-0.5 rounded-full border border-rose-300 animate-pulse">
+                                                      <AlertCircle size={11} className="text-rose-600" />
+                                                      <span>Terkunci</span>
+                                                    </span>
+                                                  ) : (
+                                                    <span className="text-[10px] font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+                                                      Belum Masuk
+                                                    </span>
+                                                  )}
+                                                </td>
+                                                <td className="py-2.5 px-3 text-[11px]">
+                                                  {stu.latestViolationType ? (
+                                                    <span className="text-rose-700 font-bold flex items-center gap-1">
+                                                      <AlertCircle size={12} className="shrink-0 text-rose-500" />
+                                                      <span className="truncate max-w-[200px]" title={stu.latestViolationType}>{stu.latestViolationType}</span>
+                                                    </span>
+                                                  ) : (
+                                                    <span className="text-gray-400 italic">Tertib</span>
+                                                  )}
+                                                </td>
+                                                <td className="py-2.5 px-3 text-center">
+                                                  <div className="flex items-center justify-center gap-1">
+                                                    {isLocked && onResetStudentToken && (
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => handleQuickReset(stu)}
+                                                        className="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-[10px] font-bold cursor-pointer transition-colors shadow-2xs"
+                                                        title="Buka kunci token siswa ini"
+                                                      >
+                                                        Buka Kunci
+                                                      </button>
+                                                    )}
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => setFocusedStudent(stu)}
+                                                      className="p-1 text-blue-600 hover:text-blue-800 rounded cursor-pointer"
+                                                      title="Detail data siswa"
+                                                    >
+                                                      <ChevronRight size={14} />
+                                                    </button>
+                                                  </div>
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    ) : (
+                                      <div className="p-6 text-center text-gray-400 italic text-xs">
+                                        Belum ada siswa yang memasukkan token #{tokenItem.code} ini.
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="p-8 text-center text-gray-400 italic text-xs">
+                          Pengawas ini belum merilis token ujian pada hari ini.
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="bg-white rounded-3xl p-12 text-center border border-gray-200/80 shadow-sm space-y-2">
+                  <History className="mx-auto text-gray-300" size={36} />
+                  <h3 className="text-sm font-bold text-gray-900">Tidak Ada Data Histori yang Cocok</h3>
+                  <p className="text-xs text-gray-500">Coba sesuaikan pencarian atau reset filter untuk menampilkan data.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* MODE 2: DAFTAR SEMUA TOKEN (FLAT LIST) */}
+          {historyViewMode === 'flat' && (
+            <div className="space-y-4">
+              {filteredFlatTokenHistoryList.length > 0 ? (
+                filteredFlatTokenHistoryList.map((tok) => {
+                  return (
+                    <div
+                      key={tok.id || tok.code}
+                      className="bg-white rounded-3xl border border-gray-200/80 shadow-sm overflow-hidden"
+                    >
+                      {/* Token Header */}
+                      <div className="p-4 bg-slate-50 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-1.5 bg-white px-3 py-1.5 rounded-xl border border-blue-200 shadow-2xs font-mono font-black text-base text-blue-800">
+                            <Key size={15} className="text-blue-600" />
+                            <span>#{tok.code}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleCopyToken(tok.code)}
+                              className="ml-1 text-gray-400 hover:text-blue-700 p-0.5 rounded cursor-pointer"
+                              title="Salin kode token"
+                            >
+                              {copiedTokenCode === tok.code ? (
+                                <Check size={13} className="text-emerald-600" />
+                              ) : (
+                                <Copy size={13} />
+                              )}
+                            </button>
+                          </div>
+
+                          <div>
+                            <h4 className="text-sm font-extrabold text-gray-900">{tok.examTitle}</h4>
+                            <p className="text-xs text-gray-500">
+                              Dirilis oleh: <strong className="text-gray-700">{tok.creatorName}</strong> ({tok.creatorRuang}) &bull; Waktu: {formatDateTimeId(tok.createdAt)}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full border ${
+                              tok.isActive
+                                ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                : 'bg-gray-100 text-gray-600 border-gray-200'
+                            }`}
+                          >
+                            {tok.isActive ? '🟢 AKTIF' : '⚪ SELESAI / EXPIRED'}
+                          </span>
+                          <span className="text-xs font-black text-indigo-700 bg-indigo-50 px-3 py-1 rounded-xl border border-indigo-200">
+                            {tok.studentCount} Siswa Terdaftar
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Participant Table */}
+                      <div className="overflow-x-auto">
+                        {tok.participants.length > 0 ? (
+                          <table className="w-full text-left text-xs border-collapse">
+                            <thead>
+                              <tr className="bg-gray-50/70 text-gray-500 text-[10px] uppercase font-bold border-b border-gray-200">
+                                <th className="py-2.5 px-3 w-10 text-center">No</th>
+                                <th className="py-2.5 px-3">Nama Siswa &amp; NIS</th>
+                                <th className="py-2.5 px-3 w-20 text-center">Kelas</th>
+                                <th className="py-2.5 px-3 w-24 text-center">Ruang</th>
+                                <th className="py-2.5 px-3 w-24">Waktu Mulai</th>
+                                <th className="py-2.5 px-3 w-28">Waktu Selesai</th>
+                                <th className="py-2.5 px-3 w-36 text-center">Status Ujian</th>
+                                <th className="py-2.5 px-3">Catatan Pelanggaran</th>
+                                <th className="py-2.5 px-3 w-28 text-center">Aksi</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                              {tok.participants.map((stu, idx) => {
+                                const isDone = stu.status === 'finished';
+                                const isRunning = stu.status === 'working' || stu.status === 'reset';
+                                const isLocked = stu.status === 'violation';
+
+                                return (
+                                  <tr key={`${stu.uid}_${stu.tokenCode}`} className="hover:bg-slate-50/70 transition-colors">
+                                    <td className="py-2.5 px-3 text-center text-gray-400 font-mono text-[11px]">{idx + 1}</td>
+                                    <td className="py-2.5 px-3">
+                                      <div className="font-extrabold text-gray-900">{stu.name}</div>
+                                      <div className="text-[10px] text-gray-400">{stu.nis ? `NIS: ${stu.nis}` : stu.email || '-'}</div>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-center">
+                                      <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded text-[11px]">
+                                        {stu.kelas || '-'}
+                                      </span>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-center text-gray-600 font-semibold">{stu.ruang || '-'}</td>
+                                    <td className="py-2.5 px-3 font-mono text-[11px] text-gray-600">
+                                      {stu.startedAt ? formatClock(stu.startedAt) : '-'}
+                                    </td>
+                                    <td className="py-2.5 px-3 font-mono text-[11px] text-gray-600">
+                                      {stu.finishedAt ? formatClock(stu.finishedAt) : isRunning ? 'Sedang Jalan' : '-'}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-center">
+                                      {isDone ? (
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full border border-emerald-200">
+                                          <CheckCircle2 size={11} className="text-emerald-600" />
+                                          <span>Selesai</span>
+                                        </span>
+                                      ) : isRunning ? (
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-blue-800 bg-blue-100 px-2 py-0.5 rounded-full border border-blue-200">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse" />
+                                          <span>Mengerjakan</span>
+                                        </span>
+                                      ) : isLocked ? (
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-rose-800 bg-rose-100 px-2 py-0.5 rounded-full border border-rose-300 animate-pulse">
+                                          <AlertCircle size={11} className="text-rose-600" />
+                                          <span>Terkunci</span>
+                                        </span>
+                                      ) : (
+                                        <span className="text-[10px] font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+                                          Belum Masuk
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-[11px]">
+                                      {stu.latestViolationType ? (
+                                        <span className="text-rose-700 font-bold flex items-center gap-1">
+                                          <AlertCircle size={12} className="shrink-0 text-rose-500" />
+                                          <span className="truncate max-w-[200px]" title={stu.latestViolationType}>{stu.latestViolationType}</span>
+                                        </span>
+                                      ) : (
+                                        <span className="text-gray-400 italic">Tertib</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-center">
+                                      <div className="flex items-center justify-center gap-1">
+                                        {isLocked && onResetStudentToken && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleQuickReset(stu)}
+                                            className="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-[10px] font-bold cursor-pointer transition-colors shadow-2xs"
+                                            title="Buka kunci token siswa ini"
+                                          >
+                                            Buka Kunci
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => setFocusedStudent(stu)}
+                                          className="p-1 text-blue-600 hover:text-blue-800 rounded cursor-pointer"
+                                          title="Detail data siswa"
+                                        >
+                                          <ChevronRight size={14} />
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        ) : (
+                          <div className="p-6 text-center text-gray-400 italic text-xs">
+                            Belum ada siswa yang menggunakan token ini.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="bg-white rounded-3xl p-12 text-center border border-gray-200/80 shadow-sm space-y-2">
+                  <Key className="mx-auto text-gray-300" size={36} />
+                  <h3 className="text-sm font-bold text-gray-900">Tidak Ada Token yang Cocok</h3>
+                  <p className="text-xs text-gray-500">Coba sesuaikan kata kunci pencarian atau reset filter.</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Modal Detail Siswa */}
       {focusedStudent && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
@@ -1724,6 +3087,183 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
               <button
                 type="button"
                 onClick={() => setFocusedStudent(null)}
+                className="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Histori Pengawas Spesifik */}
+      {selectedSupervisorModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-white rounded-3xl max-w-4xl w-full p-6 space-y-4 shadow-2xl border border-gray-200 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-50 text-indigo-700 flex items-center justify-center font-black text-base border border-indigo-100">
+                  {selectedSupervisorModal.name.charAt(0)}
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-gray-900 flex items-center gap-2">
+                    <span>{selectedSupervisorModal.name}</span>
+                    <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200">
+                      {selectedSupervisorModal.ruang !== '-' ? selectedSupervisorModal.ruang : 'Semua Ruang'}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    {selectedSupervisorModal.nip ? `NIP: ${selectedSupervisorModal.nip} • ` : ''}
+                    {selectedSupervisorModal.email || 'Pengawas Ruang'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const grp = supervisorTokenHistoryList.find((g) => g.uid === selectedSupervisorModal.uid || g.name === selectedSupervisorModal.name);
+                    if (grp) handlePrintSupervisorHistoryReport(grp);
+                  }}
+                  className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border border-gray-200"
+                >
+                  <Printer size={13} />
+                  <span>Cetak Rekap</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHistorySupervisorFilter(selectedSupervisorModal.uid || selectedSupervisorModal.name);
+                    setActiveAdminSubTab('history');
+                    setSelectedSupervisorModal(null);
+                  }}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  title="Buka tab Histori Lengkap khusus pengawas ini"
+                >
+                  <History size={13} />
+                  <span>Buka di Tab Histori</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedSupervisorModal(null)}
+                  className="text-gray-400 hover:text-gray-700 p-1.5 rounded-lg cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Metrics */}
+            <div className="grid grid-cols-4 gap-2.5 shrink-0 text-center text-xs">
+              <div className="p-2.5 rounded-2xl bg-gray-50 border border-gray-100">
+                <p className="text-[10px] font-bold text-gray-500 uppercase">Token Dirilis</p>
+                <p className="text-base font-black text-gray-900">{selectedSupervisorModal.activeTokens.length}</p>
+              </div>
+              <div className="p-2.5 rounded-2xl bg-indigo-50 border border-indigo-100">
+                <p className="text-[10px] font-bold text-indigo-800 uppercase">Total Peserta</p>
+                <p className="text-base font-black text-indigo-700">{selectedSupervisorModal.totalStudents}</p>
+              </div>
+              <div className="p-2.5 rounded-2xl bg-emerald-50 border border-emerald-100">
+                <p className="text-[10px] font-bold text-emerald-800 uppercase">Selesai</p>
+                <p className="text-base font-black text-emerald-600">{selectedSupervisorModal.finishedStudents}</p>
+              </div>
+              <div className="p-2.5 rounded-2xl bg-rose-50 border border-rose-100">
+                <p className="text-[10px] font-bold text-rose-800 uppercase">Terkendala</p>
+                <p className="text-base font-black text-rose-600">{selectedSupervisorModal.violationStudents}</p>
+              </div>
+            </div>
+
+            {/* List of Tokens & Students for this supervisor */}
+            <div className="overflow-y-auto space-y-3 flex-1 pr-1">
+              {selectedSupervisorModal.activeTokens.length > 0 ? (
+                selectedSupervisorModal.activeTokens.map((tok) => {
+                  return (
+                    <div key={tok.id || tok.code} className="rounded-2xl border border-gray-200 overflow-hidden shadow-2xs">
+                      <div className="p-3 bg-slate-50 flex items-center justify-between gap-2 border-b border-gray-200">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-black text-xs text-blue-700 bg-white px-2.5 py-1 rounded-lg border border-blue-200 shadow-2xs">
+                            #{tok.code}
+                          </span>
+                          <div>
+                            <p className="text-xs font-bold text-gray-900">{tok.examTitle}</p>
+                            <p className="text-[10px] text-gray-500">Dirilis: {formatDateTimeId(tok.createdAt)}</p>
+                          </div>
+                        </div>
+                        <span className="text-xs font-extrabold text-gray-700 bg-white px-2.5 py-0.5 rounded-lg border border-gray-200">
+                          {tok.studentCount} Siswa
+                        </span>
+                      </div>
+
+                      <div className="overflow-x-auto max-h-56">
+                        {tok.students && tok.students.length > 0 ? (
+                          <table className="w-full text-left text-xs">
+                            <thead>
+                              <tr className="bg-gray-50 text-gray-500 text-[10px] uppercase font-bold border-b border-gray-100">
+                                <th className="p-2 text-center w-8">No</th>
+                                <th className="p-2">Nama Siswa</th>
+                                <th className="p-2 text-center">Kelas</th>
+                                <th className="p-2 text-center">Ruang</th>
+                                <th className="p-2">Mulai</th>
+                                <th className="p-2">Selesai</th>
+                                <th className="p-2 text-center">Status</th>
+                                <th className="p-2 text-center">Aksi</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                              {tok.students.map((st, sIdx) => (
+                                <tr key={`${st.uid}_${sIdx}`} className="hover:bg-slate-50">
+                                  <td className="p-2 text-center text-gray-400 font-mono text-[10px]">{sIdx + 1}</td>
+                                  <td className="p-2 font-bold text-gray-900">{st.name}</td>
+                                  <td className="p-2 text-center text-blue-700 font-bold">{st.kelas}</td>
+                                  <td className="p-2 text-center text-gray-600">{st.ruang}</td>
+                                  <td className="p-2 font-mono text-[11px] text-gray-500">{formatClock(st.startedAt)}</td>
+                                  <td className="p-2 font-mono text-[11px] text-gray-500">{formatClock(st.finishedAt)}</td>
+                                  <td className="p-2 text-center">
+                                    <span
+                                      className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full border ${
+                                        st.status === 'finished'
+                                          ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                          : st.status === 'working' || st.status === 'reset'
+                                          ? 'bg-blue-100 text-blue-800 border-blue-300'
+                                          : st.status === 'violation'
+                                          ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                          : 'bg-gray-100 text-gray-600 border-gray-200'
+                                      }`}
+                                    >
+                                      {st.status}
+                                    </span>
+                                  </td>
+                                  <td className="p-2 text-center">
+                                    {st.status === 'violation' && onResetStudentToken && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleQuickReset(st)}
+                                        className="px-2 py-0.5 bg-rose-600 text-white rounded text-[10px] font-bold cursor-pointer"
+                                      >
+                                        Buka
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        ) : (
+                          <p className="p-4 text-center text-gray-400 italic text-xs">Belum ada siswa menggunakan token ini.</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="p-6 text-center text-gray-400 italic text-xs">Pengawas ini belum merilis token ujian.</p>
+              )}
+            </div>
+
+            <div className="pt-2 border-t border-gray-100 shrink-0">
+              <button
+                type="button"
+                onClick={() => setSelectedSupervisorModal(null)}
                 className="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
               >
                 Tutup

@@ -93,13 +93,34 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
               <AlertCircle size={40} />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">Ups! Terjadi Kesalahan</h2>
-            <p className="text-gray-500">{displayMessage}</p>
-            <button 
-              onClick={() => window.location.reload()}
-              className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition-all"
-            >
-              Muat Ulang Halaman
-            </button>
+            <p className="text-gray-600 text-sm leading-relaxed">{displayMessage}</p>
+            <div className="space-y-3 pt-2">
+              <button 
+                onClick={() => window.location.reload()}
+                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition-all shadow-md shadow-blue-200"
+              >
+                Muat Ulang Halaman
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    sessionStorage.clear();
+                    // Bersihkan cache sementara tanpa menghapus kredensial utama
+                    const keys = Object.keys(localStorage);
+                    keys.forEach(k => {
+                      if (k.startsWith('cached_') || k.startsWith('temp_')) {
+                        localStorage.removeItem(k);
+                      }
+                    });
+                  } catch (e) {}
+                  window.location.reload();
+                }}
+                className="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold rounded-xl text-xs transition-all"
+              >
+                Bersihkan Cache Sementara & Muat Ulang
+              </button>
+            </div>
           </div>
         </div>
       );
